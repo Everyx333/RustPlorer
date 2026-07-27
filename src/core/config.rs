@@ -223,6 +223,32 @@ impl Default for ArchiveConfig {
     }
 }
 
+/// A saved arrangement of panes and locations.
+///
+/// Restoring a workspace does NOT eagerly scan every location: only the active
+/// pane is read on load. Scanning several directories at startup is exactly
+/// the spike this app exists to avoid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Workspace {
+    pub name: String,
+    pub left_path: PathBuf,
+    /// `None` means the workspace was saved with a single pane.
+    pub right_path: Option<PathBuf>,
+    pub dual_pane: bool,
+}
+
+impl Default for Workspace {
+    fn default() -> Self {
+        Self {
+            name: "Untitled".to_string(),
+            left_path: PathBuf::from("."),
+            right_path: None,
+            dual_pane: false,
+        }
+    }
+}
+
 /// The complete configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -232,6 +258,8 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     pub behavior: BehaviorConfig,
     pub archive: ArchiveConfig,
+    /// Saved pane arrangements, restorable by name.
+    pub workspaces: Vec<Workspace>,
 }
 
 impl Default for Config {
@@ -242,6 +270,7 @@ impl Default for Config {
             appearance: AppearanceConfig::default(),
             behavior: BehaviorConfig::default(),
             archive: ArchiveConfig::default(),
+            workspaces: Vec::new(),
         }
     }
 }
@@ -412,6 +441,41 @@ mod tests {
         assert_eq!(cfg.appearance.font_size, 20.0);
         assert!(cfg.behavior.live_refresh, "missing field should default");
         assert!(cfg.performance.folder_sizes_enabled);
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn workspaces_round_trip() {
+        let p = tmp_path("workspaces.json");
+        let _ = std::fs::remove_file(&p);
+
+        let mut cfg = Config::default();
+        cfg.workspaces.push(Workspace {
+            name: "Project".to_string(),
+            left_path: PathBuf::from("/a"),
+            right_path: Some(PathBuf::from("/b")),
+            dual_pane: true,
+        });
+        cfg.save(Some(&p)).unwrap();
+
+        let loaded = Config::load(Some(&p));
+        assert_eq!(loaded.workspaces.len(), 1);
+        assert_eq!(loaded.workspaces[0].name, "Project");
+        assert!(loaded.workspaces[0].dual_pane);
+        assert_eq!(loaded.workspaces[0].right_path, Some(PathBuf::from("/b")));
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn config_without_workspaces_still_loads() {
+        // Older configs predate the workspaces field entirely.
+        let p = tmp_path("no_workspaces.json");
+        std::fs::write(&p, br#"{"schema_version":1}"#).unwrap();
+
+        let cfg = Config::load(Some(&p));
+        assert!(cfg.workspaces.is_empty());
 
         let _ = std::fs::remove_file(&p);
     }
