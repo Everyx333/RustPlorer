@@ -80,7 +80,7 @@ impl Command {
             Self::FocusSearch => Some("Ctrl+F"),
             Self::OpenSettings => Some("Ctrl+,"),
             Self::DeleteSelected => Some("Delete"),
-            Self::TogglePane => Some("F6"),
+            Self::TogglePane => Some("Ctrl+F6"),
             _ => None,
         }
     }
