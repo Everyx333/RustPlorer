@@ -17,6 +17,7 @@ use crate::fs::watcher::DirWatcher;
 use crate::ui::first_run::FirstRunStage;
 use crate::ui::palette::{Command, CommandPalette};
 use crate::ui::preview::Previewer;
+use crate::ui::rename_dialog::RenameDialog;
 use crate::ui::settings::SettingsTab;
 
 /// Status of the directory currently being displayed.
@@ -123,6 +124,7 @@ pub struct RustPlorer {
     /// First-run prompt offering to install 7-Zip or WinRAR.
     pub first_run_stage: FirstRunStage,
     pub palette: CommandPalette,
+    pub rename_dialog: RenameDialog,
     pub previewer: Previewer,
     /// Set when config changes, so we save once on a debounce rather than
     /// writing to disk on every slider tick.
@@ -189,6 +191,7 @@ impl RustPlorer {
             settings_tab: SettingsTab::Performance,
             first_run_stage: FirstRunStage::Hidden,
             palette: CommandPalette::new(),
+            rename_dialog: RenameDialog::new(),
             previewer: Previewer::new(),
             config_dirty: false,
             last_config_save: std::time::Instant::now(),
@@ -288,6 +291,7 @@ impl RustPlorer {
                 }
             }
             Command::TogglePane => self.toggle_second_pane(),
+            Command::BatchRename => self.rename_dialog.show(),
             Command::CloseArchive => {
                 if let Some(loc) = self.archive_location.clone() {
                     let containing = loc
@@ -723,22 +727,66 @@ impl RustPlorer {
     }
 
     /// Apply appearance settings to the egui context.
+    ///
+    /// Runs every frame, which is cheap (egui styles are plain structs) and
+    /// means slider changes are visible instantly rather than after a restart.
     fn apply_appearance(&self, ctx: &egui::Context) {
-        let a = &self.config.appearance;
+        use crate::core::config::parse_hex;
 
-        if let Some(dark) = a.dark_mode {
-            ctx.set_visuals(if dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            });
-        }
+        let a = &self.config.appearance;
+        let t = &a.theme;
+
+        // A malformed colour falls back to the default rather than panicking:
+        // config.json is user-editable, so typos are expected input.
+        let color = |hex: &str, fallback: egui::Color32| {
+            parse_hex(hex)
+                .map(|(r, g, b)| egui::Color32::from_rgb(r, g, b))
+                .unwrap_or(fallback)
+        };
+
+        let bg = color(&t.background, egui::Color32::from_rgb(30, 30, 30));
+        let panel = color(&t.panel, egui::Color32::from_rgb(37, 37, 38));
+        let text = color(&t.text, egui::Color32::from_rgb(212, 212, 212));
+        let accent = color(&t.accent, egui::Color32::from_rgb(14, 99, 156));
+        let stripe = color(&t.stripe, egui::Color32::from_rgb(42, 42, 43));
+
+        // Start from the light or dark base depending on the theme's own
+        // background, so widget borders and shadows stay coherent.
+        let luminance = {
+            let (r, g, b) = parse_hex(&t.background).unwrap_or((30, 30, 30));
+            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0
+        };
+        let mut visuals = if luminance > 0.5 {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        };
+
+        visuals.panel_fill = panel;
+        visuals.window_fill = bg;
+        visuals.extreme_bg_color = bg;
+        visuals.faint_bg_color = stripe;
+        visuals.override_text_color = Some(text);
+        visuals.selection.bg_fill = accent;
+        visuals.hyperlink_color = accent;
+
+        visuals.widgets.inactive.bg_fill = panel;
+        visuals.widgets.hovered.bg_fill = accent.linear_multiply(0.6);
+        visuals.widgets.active.bg_fill = accent;
+
+        ctx.set_visuals(visuals);
 
         ctx.style_mut(|style| {
             for (_, font) in style.text_styles.iter_mut() {
                 font.size = a.font_size;
             }
             style.spacing.item_spacing.y = 4.0 * a.row_spacing;
+
+            if a.monospace_listing {
+                style.override_font_id = Some(egui::FontId::monospace(a.font_size));
+            } else {
+                style.override_font_id = None;
+            }
         });
     }
 
@@ -1031,6 +1079,8 @@ impl eframe::App for RustPlorer {
         self.previewer.poll();
         crate::ui::preview::draw(self, ctx);
 
+        crate::ui::rename_dialog::draw(self, ctx);
+
         if let Some(cmd) = crate::ui::palette::draw(self, ctx) {
             self.run_command(cmd);
         }
@@ -1117,6 +1167,9 @@ fn handle_shortcuts(app: &mut RustPlorer, ctx: &egui::Context) {
         app.toggle_second_pane();
     } else if ctx.input(|i| i.key_pressed(egui::Key::F6)) {
         app.focus_other_pane();
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
+        app.rename_dialog.show();
     }
     if ctx.input(|i| i.key_pressed(egui::Key::F5) && i.modifiers.ctrl) {
         app.transfer_to_other_pane(false);
