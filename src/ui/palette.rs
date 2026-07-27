@@ -73,9 +73,9 @@ impl Command {
     /// Shortcut hint, shown right-aligned.
     pub fn shortcut(self) -> Option<&'static str> {
         match self {
-            Self::GoBack => Some("Alt+←"),
-            Self::GoForward => Some("Alt+→"),
-            Self::GoUp => Some("Alt+↑"),
+            Self::GoBack => Some("Alt+⬅"),
+            Self::GoForward => Some("Alt+➡"),
+            Self::GoUp => Some("Alt+⬆"),
             Self::Refresh => Some("F5"),
             Self::FocusSearch => Some("Ctrl+F"),
             Self::OpenSettings => Some("Ctrl+,"),
