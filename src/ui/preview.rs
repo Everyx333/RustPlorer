@@ -221,7 +221,7 @@ pub fn draw(app: &mut crate::ui::app::RustPlorer, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Preview").strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Close (Space)").clicked() {
+                    if ui.small_button("✖").on_hover_text("Close (Space)").clicked() {
                         close = true;
                     }
                 });
