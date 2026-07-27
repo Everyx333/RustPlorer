@@ -13,6 +13,7 @@ use crate::fs::scanner::{quick_access, ScanUpdate, Scanner};
 use crate::fs::search::SearchFilter;
 use crate::fs::sizer::{FolderSizer, SizeState};
 use crate::fs::watcher::DirWatcher;
+use crate::ui::first_run::FirstRunStage;
 use crate::ui::settings::SettingsTab;
 
 /// Status of the directory currently being displayed.
@@ -105,6 +106,8 @@ pub struct RustPlorer {
     pub config: Config,
     pub settings_open: bool,
     pub settings_tab: SettingsTab,
+    /// First-run prompt offering to install 7-Zip or WinRAR.
+    pub first_run_stage: FirstRunStage,
     /// Set when config changes, so we save once on a debounce rather than
     /// writing to disk on every slider tick.
     config_dirty: bool,
@@ -160,6 +163,7 @@ impl RustPlorer {
             error_banner: None,
             settings_open: false,
             settings_tab: SettingsTab::Performance,
+            first_run_stage: FirstRunStage::Hidden,
             config_dirty: false,
             last_config_save: std::time::Instant::now(),
             focus_search: false,
@@ -216,6 +220,31 @@ impl RustPlorer {
             self.watcher.stop();
         }
         self.search.invalidate();
+    }
+
+    /// Look for an installed 7-Zip/WinRAR, and offer to install one if none
+    /// is present.
+    ///
+    /// Runs once after the first paint so it never delays the window
+    /// appearing. The prompt is shown only when there is genuinely nothing
+    /// installed and the user has not already answered.
+    fn detect_external_tool(&mut self) {
+        match crate::archive::external::detect() {
+            Some(tool) => {
+                tracing::info!(tool = tool.name, "external archive tool available");
+                self.config.archive.external_tool_path = Some(tool.path);
+                self.config_dirty = true;
+            }
+            None => {
+                self.config.archive.external_tool_path = None;
+
+                // Only ask if they haven't answered before. "Ask me later"
+                // deliberately leaves this flag unset so it returns.
+                if !self.config.archive.external_tool_prompted {
+                    self.first_run_stage = FirstRunStage::Ask;
+                }
+            }
+        }
     }
 
     /// True when the listing shows archive contents rather than the disk.
@@ -619,6 +648,7 @@ impl eframe::App for RustPlorer {
             self.first_frame_done = true;
             let path = self.active().path.clone();
             self.navigate(path, false);
+            self.detect_external_tool();
         }
 
         self.apply_scan_updates();
@@ -661,6 +691,10 @@ impl eframe::App for RustPlorer {
 
         if crate::ui::settings::draw(self, ctx) {
             self.config_changed();
+        }
+
+        if crate::ui::first_run::draw(self, ctx) {
+            self.config_dirty = true;
         }
 
         self.maybe_save_config();
