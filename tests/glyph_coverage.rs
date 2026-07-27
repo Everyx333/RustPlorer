@@ -1,40 +1,58 @@
 //! Guard against missing font glyphs.
 //!
-//! egui bundles four fonts (Hack, Ubuntu-Light, NotoEmoji, emoji-icon-font).
-//! A character outside all four renders as a "tofu" box, and nothing warns you
-//! at compile time — it is only visible by looking at the running app, on
-//! Windows, which is not something CI does.
+//! # Why this test exists, and why v1 of it was wrong
 //!
-//! This shipped once: the preview panel's close button used `✕` (U+2715),
-//! which is in none of the four fonts, so users saw an empty rectangle.
+//! egui bundles four fonts, but it does **not** search all four for every
+//! character. It resolves per font *family*:
 //!
-//! This test asserts every symbol used in the UI is one that has been verified
-//! against the bundled fonts. Adding a new symbol means adding it here.
+//! - `Monospace` → Hack, Ubuntu-Light, NotoEmoji, emoji-icon-font
+//! - `Proportional` → Ubuntu-Light, NotoEmoji, emoji-icon-font  (**no Hack**)
+//!
+//! Buttons, labels and headers use Proportional. Hack is the font carrying the
+//! geometric shapes (`▲ ▼ ● ← → ↑`), so those render correctly in monospace
+//! text and as **empty boxes** on every button.
+//!
+//! The first version of this test OR'd all four fonts together, so it passed
+//! on characters that were broken in the real UI. It caught `✕` (absent
+//! everywhere) but missed `▲`, `▼`, `●`, `←`, `→`, `↑` — all of which shipped
+//! as boxes on buttons.
+//!
+//! This version models the family split, which is what egui actually does.
 
-/// Characters confirmed present in egui 0.33's bundled fonts.
-///
-/// Verified by enumerating each font's cmap table. Do not add to this list
-/// without checking — the whole point is that assumptions are what broke it.
-const VERIFIED_GLYPHS: &[(char, &str)] = &[
-    // Navigation — Hack
+/// Characters present only in Hack, and therefore unavailable to any
+/// Proportional widget: buttons, labels, headers, hover text.
+const HACK_ONLY: &[(char, &str)] = &[
+    ('▲', "U+25B2 — use ⬆ (U+2B06) on buttons"),
+    ('▼', "U+25BC — use ⬇ (U+2B07) on buttons"),
+    ('●', "U+25CF — use ⚫ (U+26AB) on buttons"),
+    ('←', "U+2190 — use ⬅ (U+2B05) in labels"),
+    ('→', "U+2192 — use ➡ (U+27A1) in labels"),
+    ('↑', "U+2191 — use ⬆ (U+2B06) in labels"),
+];
+
+/// Characters absent from every bundled font.
+const MISSING_EVERYWHERE: &[(char, &str)] = &[
+    ('✕', "U+2715 — use ✖ (U+2716)"),
+    ('⬒', "U+2B12 — use ▣ (U+25A3)"),
+];
+
+/// Characters verified present in the Proportional family, so they are safe
+/// anywhere in the UI.
+const PROPORTIONAL_SAFE: &[(char, &str)] = &[
     ('◀', "back"),
     ('▶', "forward"),
-    ('▲', "up / sort ascending"),
-    ('▼', "sort descending"),
-    ('←', "left arrow in shortcut hints"),
-    ('→', "right arrow in shortcut hints"),
-    ('↑', "up arrow in shortcut hints"),
-    // Actions — emoji fonts
+    ('⬆', "up / sort ascending"),
+    ('⬇', "sort descending"),
+    ('⬅', "left arrow in shortcut hints"),
+    ('➡', "right arrow in shortcut hints"),
     ('⟳', "refresh"),
-    ('✖', "close / clear (replaces U+2715, which is NOT available)"),
+    ('✖', "close / clear"),
     ('🔍', "search"),
-    // File kinds — NotoEmoji
     ('📁', "folder"),
     ('📄', "file"),
     ('📦', "archive"),
     ('🔗', "symlink"),
     ('💾', "drive"),
-    // Settings tabs
     ('⚙', "settings"),
     ('⚡', "performance"),
     ('🔧', "behavior"),
@@ -42,53 +60,76 @@ const VERIFIED_GLYPHS: &[(char, &str)] = &[
     ('⌨', "keybindings"),
     ('ℹ', "about"),
     ('⚠', "warning"),
-    // Typography — Hack / Ubuntu
+    ('⚫', "focused pane marker"),
+    ('○', "unfocused pane marker"),
+    ('▣', "workspace"),
     ('›', "breadcrumb separator"),
     ('…', "calculating / truncated"),
     ('≥', "at-least size"),
     ('—', "unknown value"),
 ];
 
-/// Characters known to be MISSING. Using any of these produces a tofu box.
-const KNOWN_MISSING: &[(char, &str)] = &[
-    ('✕', "U+2715 MULTIPLICATION X — absent from all bundled fonts; use U+2716 instead"),
-];
-
 #[test]
-fn known_missing_glyphs_are_not_used_in_source() {
-    let sources = collect_sources();
-    assert!(!sources.is_empty(), "no source files found");
+fn no_hack_only_glyphs_in_rendered_strings() {
+    let sources = collect_ui_strings();
+    assert!(!sources.is_empty(), "no UI string literals found");
 
-    for (ch, why) in KNOWN_MISSING {
-        for (path, text) in &sources {
+    for (ch, fix) in HACK_ONLY {
+        for (path, line_no, line) in &sources {
             assert!(
-                !text.contains(*ch),
-                "{path} uses '{ch}', which renders as an empty box.\n  {why}"
+                !line.contains(*ch),
+                "{path}:{line_no} renders '{ch}' in a Proportional widget, \
+                 where it shows as an empty box.\n  Fix: {fix}\n  Line: {}",
+                line.trim()
             );
         }
     }
 }
 
 #[test]
-fn verified_and_missing_lists_do_not_overlap() {
-    for (ch, _) in VERIFIED_GLYPHS {
+fn no_universally_missing_glyphs() {
+    let sources = collect_ui_strings();
+
+    for (ch, fix) in MISSING_EVERYWHERE {
+        for (path, line_no, line) in &sources {
+            assert!(
+                !line.contains(*ch),
+                "{path}:{line_no} uses '{ch}', which no bundled font \
+                 contains.\n  Fix: {fix}\n  Line: {}",
+                line.trim()
+            );
+        }
+    }
+}
+
+#[test]
+fn safe_and_unsafe_lists_do_not_overlap() {
+    for (ch, _) in PROPORTIONAL_SAFE {
         assert!(
-            !KNOWN_MISSING.iter().any(|(m, _)| m == ch),
-            "'{ch}' is listed as both verified and missing"
+            !HACK_ONLY.iter().any(|(b, _)| b == ch),
+            "'{ch}' is listed as both safe and Hack-only"
+        );
+        assert!(
+            !MISSING_EVERYWHERE.iter().any(|(b, _)| b == ch),
+            "'{ch}' is listed as both safe and missing"
         );
     }
 }
 
 #[test]
-fn every_verified_glyph_is_documented() {
-    for (ch, note) in VERIFIED_GLYPHS {
+fn every_safe_glyph_is_documented() {
+    for (ch, note) in PROPORTIONAL_SAFE {
         assert!(!note.is_empty(), "'{ch}' needs a description of its use");
     }
 }
 
-/// Read every `.rs` file under `src/`.
-fn collect_sources() -> Vec<(String, String)> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+/// Collect string literals from source, skipping comments.
+///
+/// Only rendered text matters. Documentation legitimately contains arrows and
+/// shapes (`temp → fsync → rename`); flagging those would produce noise and
+/// train people to ignore this test.
+fn collect_ui_strings() -> Vec<(String, usize, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, usize, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -97,8 +138,18 @@ fn collect_sources() -> Vec<(String, String)> {
             if path.is_dir() {
                 walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    out.push((path.display().to_string(), text));
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (i, line) in text.lines().enumerate() {
+                    // Skip comments and doc comments.
+                    if line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    // Only lines with a string literal can render text.
+                    if line.contains('"') {
+                        out.push((path.display().to_string(), i + 1, line.to_string()));
+                    }
                 }
             }
         }
