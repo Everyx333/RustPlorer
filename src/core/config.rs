@@ -80,6 +80,10 @@ pub struct PerformanceConfig {
     /// Rows beyond the viewport to pre-size, so sizes are ready when they
     /// scroll into view.
     pub size_lookahead_rows: usize,
+    /// Show image thumbnails instead of a generic file icon.
+    pub thumbnails_enabled: bool,
+    /// Hard ceiling on thumbnail memory, in megabytes.
+    pub thumbnail_cache_mb: usize,
 }
 
 impl Default for PerformanceConfig {
@@ -91,6 +95,8 @@ impl Default for PerformanceConfig {
             concurrent_size_walks: balanced_walks(cpus),
             folder_sizes_enabled: true,
             size_lookahead_rows: 20,
+            thumbnails_enabled: true,
+            thumbnail_cache_mb: 64,
         }
     }
 }
