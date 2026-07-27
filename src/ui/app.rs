@@ -6,7 +6,11 @@ use crate::core::logging::Diagnostics;
 use crate::core::paths::AppPaths;
 use crate::core::task::WorkerPool;
 use crate::fs::entry::{sort_entries, Entry, SortKey, SortOrder};
+use crate::fs::ops::{FileOp, OpRunner, OpUpdate};
 use crate::fs::scanner::{quick_access, ScanUpdate, Scanner};
+use crate::fs::search::SearchFilter;
+use crate::fs::sizer::{FolderSizer, SizeState};
+use crate::fs::watcher::DirWatcher;
 
 /// Status of the directory currently being displayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +84,22 @@ pub struct RustPlorer {
     pub drives: Vec<PathBuf>,
     pub quick_access: Vec<(String, PathBuf)>,
 
+    pub sizer: FolderSizer,
+    pub search: SearchFilter,
+    pub watcher: DirWatcher,
+    pub ops: OpRunner,
+
+    /// Progress line for a running file operation, if any.
+    pub op_status: Option<String>,
+    /// Last error, shown as a dismissible banner.
+    pub error_banner: Option<String>,
+
+    /// Whether to compute folder sizes. On by default -- it is the feature
+    /// Explorer lacks -- but switchable for very slow network drives.
+    pub compute_folder_sizes: bool,
+    /// Focus the search box on the next frame (set by Ctrl+F).
+    pub focus_search: bool,
+
     pub sort_key: SortKey,
     pub sort_order: SortOrder,
     pub show_hidden: bool,
@@ -108,6 +128,14 @@ impl RustPlorer {
             quick_access: quick_access(),
             tabs: vec![Tab::new(start_dir)],
             active_tab: 0,
+            sizer: FolderSizer::new(),
+            search: SearchFilter::new(),
+            watcher: DirWatcher::new(),
+            ops: OpRunner::new(),
+            op_status: None,
+            error_banner: None,
+            compute_folder_sizes: true,
+            focus_search: false,
             sort_key: SortKey::Name,
             sort_order: SortOrder::Ascending,
             show_hidden: false,
@@ -143,8 +171,129 @@ impl RustPlorer {
 
         // Bumping the generation here is what makes leaving a slow directory
         // instant — the outstanding scan is abandoned rather than awaited.
-        self.scanner.scan_dir(&self.pool, path, show_hidden);
+        self.scanner.scan_dir(&self.pool, path.clone(), show_hidden);
         self.tabs[self.active_tab].generation = self.pool.generation().current();
+
+        // Watch the new location for live updates, and invalidate any active
+        // filter since it refers to the previous listing.
+        self.watcher.watch(path);
+        self.search.invalidate();
+    }
+
+    /// Ask for folder sizes for the directories currently on screen.
+    ///
+    /// Called with the visible row range each frame. Requesting only what is
+    /// visible is what keeps this affordable in a folder with thousands of
+    /// subdirectories.
+    pub fn request_visible_sizes(&mut self, visible: std::ops::Range<usize>) {
+        if !self.compute_folder_sizes {
+            return;
+        }
+
+        let paths: Vec<PathBuf> = {
+            let entries = &self.tabs[self.active_tab].entries;
+            visible
+                .filter_map(|i| entries.get(i))
+                .filter(|e| e.is_dir())
+                .map(|e| e.path.clone())
+                .collect()
+        };
+
+        for p in paths {
+            self.sizer.request(&self.pool, p);
+        }
+    }
+
+    /// Size for a directory, if known.
+    pub fn folder_size(&self, path: &std::path::Path) -> Option<SizeState> {
+        self.sizer.get(path)
+    }
+
+    /// Fold in filesystem change notifications.
+    fn apply_watch_events(&mut self) {
+        let events = self.watcher.poll();
+        if events.is_empty() {
+            return;
+        }
+
+        // Only react to changes in the directory we are actually showing.
+        let current = self.active().path.clone();
+        if events.iter().any(|e| e.path == current) {
+            tracing::debug!(?current, "directory changed on disk; refreshing");
+            // Sizes may be stale now, so drop the cache for this listing.
+            self.sizer.clear();
+            self.refresh();
+        }
+    }
+
+    /// Fold in folder-size results.
+    fn apply_size_updates(&mut self) {
+        // Results are read from the sizer's cache during render; draining the
+        // channel here just keeps it from growing unbounded and lets us log.
+        let _ = self.sizer.poll();
+    }
+
+    /// Fold in file-operation progress.
+    fn apply_op_updates(&mut self) {
+        for update in self.ops.poll() {
+            match update {
+                OpUpdate::Progress {
+                    label,
+                    current_file,
+                    files_done,
+                    files_total,
+                    bytes_done,
+                    bytes_total,
+                    ..
+                } => {
+                    let pct = if bytes_total > 0 {
+                        (bytes_done as f64 / bytes_total as f64 * 100.0) as u32
+                    } else {
+                        0
+                    };
+                    self.op_status = Some(format!(
+                        "{label} {current_file} — {files_done}/{files_total} files, {pct}%"
+                    ));
+                }
+                OpUpdate::Finished { touched, skipped, .. } => {
+                    self.op_status = None;
+                    if skipped > 0 {
+                        self.error_banner =
+                            Some(format!("{skipped} item(s) skipped because they already exist."));
+                    }
+                    // Refresh if the operation touched what we are viewing.
+                    let current = self.active().path.clone();
+                    if touched.iter().any(|p| p == &current) {
+                        self.sizer.clear();
+                        self.refresh();
+                    }
+                }
+                OpUpdate::Failed { error, .. } => {
+                    self.op_status = None;
+                    self.error_banner = Some(error);
+                }
+                OpUpdate::Cancelled { .. } => {
+                    self.op_status = None;
+                }
+            }
+        }
+    }
+
+    /// Queue a file operation.
+    pub fn submit_op(&mut self, op: FileOp) {
+        self.ops.submit(&self.pool, op);
+    }
+
+    /// Send the current selection to the Recycle Bin.
+    pub fn trash_selected(&mut self) {
+        let Some(idx) = self.active().selected else {
+            return;
+        };
+        let Some(entry) = self.active().entries.get(idx) else {
+            return;
+        };
+        let path = entry.path.clone();
+        self.submit_op(FileOp::Trash { paths: vec![path] });
     }
 
     pub fn go_back(&mut self) {
@@ -293,6 +442,17 @@ impl eframe::App for RustPlorer {
         }
 
         self.apply_scan_updates();
+        self.apply_watch_events();
+        self.apply_size_updates();
+        self.apply_op_updates();
+
+        // Recompute the filter if the query or listing changed. Cheap no-op
+        // otherwise.
+        let entries = std::mem::take(&mut self.tabs[self.active_tab].entries);
+        self.search.refresh(&entries);
+        self.tabs[self.active_tab].entries = entries;
+
+        handle_shortcuts(self, ctx);
 
         crate::ui::sidebar::draw(self, ctx);
         crate::ui::file_table::draw(self, ctx);
@@ -300,9 +460,68 @@ impl eframe::App for RustPlorer {
         // Repaint while a scan is streaming so incoming batches are shown
         // promptly. When idle, egui sleeps — which is what keeps a file manager
         // at ~0% CPU sitting in the background.
-        if self.active().state == LoadState::Loading {
+        // Repaint while work is streaming in. When fully idle egui sleeps,
+        // which is what keeps background CPU near zero.
+        let busy = self.active().state == LoadState::Loading || self.op_status.is_some();
+        if busy {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        } else if self.compute_folder_sizes {
+            // Slower tick while folder sizes count up.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
+    }
+}
+
+/// Global keyboard shortcuts.
+fn handle_shortcuts(app: &mut RustPlorer, ctx: &egui::Context) {
+    // Skip while a text field has focus, so typing "f" in the search box does
+    // not trigger commands.
+    if ctx.memory(|m| m.focused().is_some()) {
+        // Escape still needs to work, to leave the search box.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            app.search.clear();
+            ctx.memory_mut(|m| m.request_focus(egui::Id::NULL));
+        }
+        return;
+    }
+
+    let input = ctx.input(|i| {
+        (
+            i.key_pressed(egui::Key::F5),
+            i.key_pressed(egui::Key::Backspace),
+            i.key_pressed(egui::Key::Delete),
+            i.key_pressed(egui::Key::F) && i.modifiers.ctrl,
+            i.key_pressed(egui::Key::ArrowLeft) && i.modifiers.alt,
+            i.key_pressed(egui::Key::ArrowRight) && i.modifiers.alt,
+            i.key_pressed(egui::Key::ArrowUp) && i.modifiers.alt,
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+
+    let (f5, backspace, delete, ctrl_f, alt_left, alt_right, alt_up, escape) = input;
+
+    if f5 {
+        app.sizer.clear();
+        app.refresh();
+    }
+    if backspace || alt_up {
+        app.go_up();
+    }
+    if alt_left {
+        app.go_back();
+    }
+    if alt_right {
+        app.go_forward();
+    }
+    if ctrl_f {
+        app.focus_search = true;
+    }
+    if delete {
+        app.trash_selected();
+    }
+    if escape {
+        app.search.clear();
+        app.error_banner = None;
     }
 }
 
