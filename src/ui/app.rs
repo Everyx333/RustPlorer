@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::archive::browser::{ArchiveBrowser, ArchiveLocation};
 use crate::core::config::Config;
 use crate::core::logging::Diagnostics;
 use crate::core::paths::AppPaths;
@@ -86,6 +87,10 @@ pub struct RustPlorer {
     pub drives: Vec<PathBuf>,
     pub quick_access: Vec<(String, PathBuf)>,
 
+    /// Set when browsing inside an archive rather than the filesystem.
+    pub archive_location: Option<ArchiveLocation>,
+    pub archives: ArchiveBrowser,
+
     pub sizer: FolderSizer,
     pub search: SearchFilter,
     pub watcher: DirWatcher,
@@ -145,6 +150,8 @@ impl RustPlorer {
             quick_access: quick_access(),
             tabs: vec![Tab::new(start_dir)],
             active_tab: 0,
+            archive_location: None,
+            archives: ArchiveBrowser::new(),
             sizer,
             search: SearchFilter::new(),
             watcher: DirWatcher::new(),
@@ -174,8 +181,14 @@ impl RustPlorer {
         &mut self.tabs[self.active_tab]
     }
 
-    /// Navigate the active tab to `path`.
+    /// Navigate the active tab to `path` on the real filesystem.
     pub fn navigate(&mut self, path: PathBuf, record_history: bool) {
+        // Any filesystem navigation exits archive-browsing mode.
+        if self.archive_location.is_some() {
+            self.archive_location = None;
+            self.archives.close();
+        }
+
         let show_hidden = self.show_hidden;
 
         {
@@ -203,6 +216,82 @@ impl RustPlorer {
             self.watcher.stop();
         }
         self.search.invalidate();
+    }
+
+    /// True when the listing shows archive contents rather than the disk.
+    pub fn in_archive(&self) -> bool {
+        self.archive_location.is_some()
+    }
+
+    /// Open an archive and browse its root.
+    pub fn open_archive(&mut self, archive: PathBuf) {
+        tracing::info!(?archive, "opening archive");
+        self.archives.open(&self.pool, archive.clone());
+        self.archive_location = Some(ArchiveLocation::root(archive));
+        self.search.invalidate();
+    }
+
+    /// Move to a folder inside the open archive.
+    pub fn enter_archive_dir(&mut self, name: &str) {
+        if let Some(loc) = &self.archive_location {
+            self.archive_location = Some(loc.child(name));
+            self.search.invalidate();
+        }
+    }
+
+    /// Go up inside the archive, leaving it entirely at the root.
+    pub fn archive_go_up(&mut self) {
+        let Some(loc) = self.archive_location.clone() else {
+            return;
+        };
+
+        match loc.parent() {
+            Some(parent) => {
+                self.archive_location = Some(parent);
+                self.search.invalidate();
+            }
+            None => {
+                // At the archive root, "up" means back to the containing
+                // folder on disk.
+                let containing = loc
+                    .archive
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                self.navigate(containing, true);
+            }
+        }
+    }
+
+    /// Entries to display: archive contents when browsing one, else the disk
+    /// listing. Converted to `Entry` so the table renders both identically.
+    pub fn archive_entries_as_listing(&self) -> Vec<Entry> {
+        let Some(loc) = &self.archive_location else {
+            return Vec::new();
+        };
+
+        self.archives
+            .entries_at(loc)
+            .into_iter()
+            .map(|a| Entry {
+                path: PathBuf::from(&a.path),
+                name: a.name().to_string(),
+                kind: if a.is_dir {
+                    crate::fs::entry::EntryKind::Directory
+                } else {
+                    crate::fs::entry::EntryKind::File
+                },
+                // Archives know their sizes up front, so unlike real folders
+                // these need no background walk.
+                size: Some(a.size),
+                modified: a.modified,
+                is_hidden: false,
+                is_readonly: true,
+                extension: std::path::Path::new(&a.path)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase()),
+            })
+            .collect()
     }
 
     /// Ask for folder sizes for the directories currently on screen.
@@ -402,6 +491,10 @@ impl RustPlorer {
     }
 
     pub fn go_up(&mut self) {
+        if self.in_archive() {
+            self.archive_go_up();
+            return;
+        }
         if let Some(parent) = self.active().path.parent().map(|p| p.to_path_buf()) {
             self.navigate(parent, true);
         }
@@ -529,6 +622,27 @@ impl eframe::App for RustPlorer {
         }
 
         self.apply_scan_updates();
+
+        // Surface archive-loading failures as a banner.
+        if let Some(err) = self.archives.poll() {
+            self.error_banner = Some(err);
+            self.archive_location = None;
+        }
+
+        // While browsing an archive the listing comes from memory, so refresh
+        // it into the tab each frame.
+        if self.in_archive() {
+            let listing = self.archive_entries_as_listing();
+            let (key, order) = (self.sort_key, self.sort_order);
+            self.tabs[self.active_tab].entries = listing;
+            sort_entries(&mut self.tabs[self.active_tab].entries, key, order);
+            self.tabs[self.active_tab].state = if self.archives.is_loading() {
+                LoadState::Loading
+            } else {
+                LoadState::Loaded
+            };
+        }
+
         self.apply_watch_events();
         self.apply_size_updates();
         self.apply_op_updates();
