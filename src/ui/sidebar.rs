@@ -6,6 +6,9 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
     // Deferred so we don't mutate `app` while borrowing its lists.
     let mut navigate_to = None;
     let mut settings_changed = false;
+    let mut save_workspace: Option<String> = None;
+    let mut load_workspace: Option<String> = None;
+    let mut delete_workspace: Option<String> = None;
 
     egui::SidePanel::left("sidebar")
         .resizable(true)
@@ -64,6 +67,57 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                     settings_changed = true;
                 }
 
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.label(egui::RichText::new("Workspaces").strong());
+                ui.add_space(2.0);
+
+                let saved: Vec<String> =
+                    app.config.workspaces.iter().map(|w| w.name.clone()).collect();
+
+                if saved.is_empty() {
+                    ui.label(
+                        egui::RichText::new("None saved yet")
+                            .weak()
+                            .small()
+                            .italics(),
+                    );
+                }
+
+                for name in &saved {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button(format!("⬒ {name}"))
+                            .on_hover_text("Restore this layout")
+                            .clicked()
+                        {
+                            load_workspace = Some(name.clone());
+                        }
+                        if ui.small_button("✖").on_hover_text("Delete").clicked() {
+                            delete_workspace = Some(name.clone());
+                        }
+                    });
+                }
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.workspace_name_input)
+                            .desired_width(110.0)
+                            .hint_text("Name…"),
+                    );
+                    let can_save = !app.workspace_name_input.trim().is_empty();
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save"))
+                        .on_hover_text("Save the current pane layout")
+                        .clicked()
+                    {
+                        save_workspace = Some(app.workspace_name_input.trim().to_string());
+                    }
+                });
+
                 ui.add_space(8.0);
 
                 if ui
@@ -84,6 +138,16 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
             });
         });
 
+    if let Some(name) = save_workspace {
+        app.save_workspace(name);
+        app.workspace_name_input.clear();
+    }
+    if let Some(name) = load_workspace {
+        app.load_workspace(&name);
+    }
+    if let Some(name) = delete_workspace {
+        app.delete_workspace(&name);
+    }
     if settings_changed {
         app.config_changed();
     }
