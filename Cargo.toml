@@ -6,24 +6,26 @@ rust-version = "1.85"
 description = "A fast, lightweight file manager for Windows"
 license = "MIT"
 
+# ---------------------------------------------------------------------------
+# ALL shared dependencies live in this one section.
+#
+# Do NOT insert a [target.'cfg(...)'] header in the middle of this list. TOML
+# assigns every key following a header to that header's table, so a section
+# added here silently makes everything below it platform-specific. That exact
+# mistake shipped a build where `tracing`, `egui`, and ~20 other crates existed
+# on Linux but not on Windows. Platform overrides go at the BOTTOM.
+# ---------------------------------------------------------------------------
 [dependencies]
-arboard = "3"
-chrono = "0.4"
-crossbeam-channel = "0.5"
-directories = "6"
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence"] }
-egui = "0.33"
-egui_extras = "0.33"
-humansize = "2"
-parking_lot = "0.12"
-tracing-appender = "0.2"
-tracing-subscriber = "0.3"
-
-[target.'cfg(not(windows))'.dependencies]
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence", "x11", "wayland"] }
+# GUI
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+] }
 egui = "0.33"
 egui_extras = { version = "0.33", features = ["image"] }
 
+# Concurrency and filesystem
 jwalk = "0.8"
 notify = "8"
 notify-debouncer-full = "0.5"
@@ -32,8 +34,10 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 dashmap = "6"
 
+# Search
 nucleo-matcher = "0.3"
 
+# Serialization and utilities
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "6"
@@ -42,10 +46,13 @@ chrono = "0.4"
 anyhow = "1"
 thiserror = "2"
 
+# Diagnostics. The `env-filter` feature is required for EnvFilter — without it
+# the import fails with "no EnvFilter in the root".
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
+# Archives (all pure Rust — no C toolchain required)
 zesven = "1.2"
 zip = { version = "7", default-features = false, features = ["deflate", "time"] }
 rars = "0.4"
@@ -54,9 +61,16 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 lzma-rs = "0.3"
 ruzstd = "0.8"
 
+# Shell integration
 trash = "5"
 arboard = "3"
 open = "5"
+
+# ---------------------------------------------------------------------------
+# Platform-specific overrides. Keep these LAST.
+# Cargo unions features across target tables, so entries below only ADD to the
+# definitions above.
+# ---------------------------------------------------------------------------
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -67,13 +81,24 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
 ] }
 
+# Linux needs a windowing backend selected explicitly. These features must not
+# be enabled on Windows, where they would pull in X11/Wayland system libraries.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+    "x11",
+    "wayland",
+] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-# NOTE: panic="abort" deliberately NOT set — it would make catch_unwind a no-op,
-# and worker-task fault isolation is worth more than the binary-size saving.
+# panic = "abort" deliberately NOT set: it would make catch_unwind a no-op, and
+# surviving a malformed archive is worth more than the binary-size saving.
 
 [profile.dev]
 opt-level = 1
