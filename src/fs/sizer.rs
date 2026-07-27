@@ -45,11 +45,11 @@ const MAX_ENTRIES: usize = 2_000_000;
 /// Publish a running total every N entries.
 const PROGRESS_INTERVAL: usize = 20_000;
 
-/// Concurrent size walks allowed at once.
+/// Default concurrent size walks, used until configured.
 ///
-/// Deliberately small and independent of the scan pool: the bottleneck is the
-/// disk, not the CPU, and more parallel walks make it slower, not faster.
-const MAX_CONCURRENT_WALKS: usize = 2;
+/// The right value depends on the storage, not the CPU: NVMe drives reward
+/// deep queues, spinning disks thrash. Configurable in Settings > Performance.
+const DEFAULT_CONCURRENT_WALKS: usize = 4;
 
 /// State of a folder's size calculation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,8 +99,10 @@ pub struct FolderSizer {
     /// Memoized results. `DashMap` so workers can write while the UI reads,
     /// without a global lock on the render path.
     cache: Arc<DashMap<PathBuf, SizeState>>,
-    /// Number of walks currently running, capped at `MAX_CONCURRENT_WALKS`.
+    /// Number of walks currently running.
     active: Arc<AtomicUsize>,
+    /// Configurable ceiling on concurrent walks.
+    max_concurrent: Arc<AtomicUsize>,
     tx: Sender<SizeUpdate>,
     rx: Receiver<SizeUpdate>,
 }
@@ -117,9 +119,21 @@ impl FolderSizer {
         Self {
             cache: Arc::new(DashMap::new()),
             active: Arc::new(AtomicUsize::new(0)),
+            max_concurrent: Arc::new(AtomicUsize::new(DEFAULT_CONCURRENT_WALKS)),
             tx,
             rx,
         }
+    }
+
+    /// Set how many folder walks may run at once. Applies immediately —
+    /// raising it lets queued folders start on the next frame.
+    pub fn set_max_concurrent(&self, n: usize) {
+        self.max_concurrent.store(n.clamp(1, 32), Ordering::Release);
+    }
+
+    /// Current concurrency ceiling.
+    pub fn max_concurrent(&self) -> usize {
+        self.max_concurrent.load(Ordering::Acquire)
     }
 
     /// Look up a cached size, if present.
@@ -150,7 +164,7 @@ impl FolderSizer {
         // Respect the concurrency cap. Rows that miss out here simply get
         // picked up on a later frame, which is why `request` must be cheap.
         let running = self.active.load(Ordering::Acquire);
-        if running >= MAX_CONCURRENT_WALKS {
+        if running >= self.max_concurrent.load(Ordering::Acquire) {
             return;
         }
 
