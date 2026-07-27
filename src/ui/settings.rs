@@ -391,6 +391,15 @@ fn archives_tab(app: &mut RustPlorer, ui: &mut egui::Ui) -> bool {
         }
     }
 
+    ui.add_space(8.0);
+    if ui
+        .button("Install 7-Zip or WinRAR…")
+        .on_hover_text("Opens the official download page in your browser")
+        .clicked()
+    {
+        app.first_run_stage = crate::ui::first_run::FirstRunStage::Choose;
+    }
+
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
