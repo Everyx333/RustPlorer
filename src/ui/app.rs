@@ -14,6 +14,8 @@ use crate::fs::search::SearchFilter;
 use crate::fs::sizer::{FolderSizer, SizeState};
 use crate::fs::watcher::DirWatcher;
 use crate::ui::first_run::FirstRunStage;
+use crate::ui::palette::{Command, CommandPalette};
+use crate::ui::preview::Previewer;
 use crate::ui::settings::SettingsTab;
 
 /// Status of the directory currently being displayed.
@@ -104,10 +106,14 @@ pub struct RustPlorer {
 
     /// Persistent user settings.
     pub config: Config,
+    /// Whether the second pane is visible.
+    pub dual_pane: bool,
     pub settings_open: bool,
     pub settings_tab: SettingsTab,
     /// First-run prompt offering to install 7-Zip or WinRAR.
     pub first_run_stage: FirstRunStage,
+    pub palette: CommandPalette,
+    pub previewer: Previewer,
     /// Set when config changes, so we save once on a debounce rather than
     /// writing to disk on every slider tick.
     config_dirty: bool,
@@ -161,9 +167,12 @@ impl RustPlorer {
             ops: OpRunner::new(),
             op_status: None,
             error_banner: None,
+            dual_pane: false,
             settings_open: false,
             settings_tab: SettingsTab::Performance,
             first_run_stage: FirstRunStage::Hidden,
+            palette: CommandPalette::new(),
+            previewer: Previewer::new(),
             config_dirty: false,
             last_config_save: std::time::Instant::now(),
             focus_search: false,
@@ -220,6 +229,116 @@ impl RustPlorer {
             self.watcher.stop();
         }
         self.search.invalidate();
+    }
+
+    /// Run a command from the palette or a keyboard shortcut.
+    pub fn run_command(&mut self, cmd: Command) {
+        tracing::debug!(?cmd, "running command");
+
+        match cmd {
+            Command::GoBack => self.go_back(),
+            Command::GoForward => self.go_forward(),
+            Command::GoUp => self.go_up(),
+            Command::Refresh => {
+                self.sizer.clear();
+                self.refresh();
+            }
+            Command::ToggleHidden => self.toggle_hidden(),
+            Command::ToggleFolderSizes => {
+                let on = !self.config.performance.folder_sizes_enabled;
+                self.config.performance.folder_sizes_enabled = on;
+                if !on {
+                    self.sizer.clear();
+                }
+                self.config_dirty = true;
+            }
+            Command::FocusSearch => self.focus_search = true,
+            Command::OpenSettings => self.settings_open = true,
+            Command::CopyDiagnostics => {
+                let report = self.diagnostics_report();
+                self.copy_to_clipboard(report, "Diagnostics copied");
+            }
+            Command::CopyPath => {
+                let path = self.active().path.display().to_string();
+                self.copy_to_clipboard(path, "Path copied");
+            }
+            Command::NewFolder => self.create_new_folder(),
+            Command::DeleteSelected => self.trash_selected(),
+            Command::OpenInExplorer => {
+                let path = self.active().path.clone();
+                if let Err(e) = open::that_detached(&path) {
+                    tracing::warn!(error = %e, "could not open in shell");
+                }
+            }
+            Command::TogglePane => self.toggle_second_pane(),
+            Command::CloseArchive => {
+                if let Some(loc) = self.archive_location.clone() {
+                    let containing = loc
+                        .archive
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    self.navigate(containing, true);
+                }
+            }
+        }
+    }
+
+    /// Put text on the clipboard, reporting failure rather than silently
+    /// doing nothing.
+    fn copy_to_clipboard(&mut self, text: String, success_msg: &str) {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => tracing::info!("{success_msg}"),
+            Err(e) => {
+                tracing::warn!(error = %e, "clipboard unavailable");
+                self.error_banner = Some("Could not access the clipboard.".to_string());
+            }
+        }
+    }
+
+    /// Create "New folder" in the current directory, numbering to avoid
+    /// clobbering an existing one.
+    fn create_new_folder(&mut self) {
+        if self.in_archive() {
+            self.error_banner =
+                Some("Cannot create folders inside an archive.".to_string());
+            return;
+        }
+
+        let base = self.active().path.clone();
+        let mut candidate = base.join("New folder");
+        let mut n = 2;
+        while candidate.exists() && n < 1000 {
+            candidate = base.join(format!("New folder ({n})"));
+            n += 1;
+        }
+
+        self.submit_op(FileOp::CreateDir { path: candidate });
+    }
+
+    /// Show or hide the second pane.
+    pub fn toggle_second_pane(&mut self) {
+        self.dual_pane = !self.dual_pane;
+        tracing::debug!(enabled = self.dual_pane, "dual pane toggled");
+    }
+
+    /// Preview the selected file.
+    pub fn toggle_preview(&mut self) {
+        if self.in_archive() {
+            return;
+        }
+        let Some(idx) = self.active().selected else {
+            return;
+        };
+        let Some(entry) = self.active().entries.get(idx) else {
+            return;
+        };
+        if entry.is_dir() {
+            return;
+        }
+
+        let path = entry.path.clone();
+        self.previewer.toggle(&self.pool, path);
     }
 
     /// Look for an installed 7-Zip/WinRAR, and offer to install one if none
@@ -697,6 +816,13 @@ impl eframe::App for RustPlorer {
             self.config_dirty = true;
         }
 
+        self.previewer.poll();
+        crate::ui::preview::draw(self, ctx);
+
+        if let Some(cmd) = crate::ui::palette::draw(self, ctx) {
+            self.run_command(cmd);
+        }
+
         self.maybe_save_config();
 
         // Repaint while a scan is streaming so incoming batches are shown
@@ -716,8 +842,17 @@ impl eframe::App for RustPlorer {
 
 /// Global keyboard shortcuts.
 fn handle_shortcuts(app: &mut RustPlorer, ctx: &egui::Context) {
-    // Skip while a text field has focus, so typing "f" in the search box does
-    // not trigger commands.
+    // The command palette must work from anywhere, including mid-typing --
+    // that is the point of a palette. Its modifier combination is one no text
+    // field consumes, so it is safe to check before the focus guard.
+    if ctx.input(|i| i.key_pressed(egui::Key::P) && i.modifiers.ctrl && i.modifiers.shift) {
+        app.palette.show();
+        return;
+    }
+
+    // Everything below is a bare key, so it must not fire while a text field
+    // has focus -- otherwise typing "f" in the filter box would navigate, and
+    // Space would open a preview instead of inserting a space.
     if ctx.memory(|m| m.focused().is_some()) {
         // Escape still needs to work, to leave the search box.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -760,6 +895,12 @@ fn handle_shortcuts(app: &mut RustPlorer, ctx: &egui::Context) {
     }
     if ctx.input(|i| i.key_pressed(egui::Key::Comma) && i.modifiers.ctrl) {
         app.settings_open = !app.settings_open;
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        app.toggle_preview();
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::F6)) {
+        app.toggle_second_pane();
     }
     if delete {
         app.trash_selected();
