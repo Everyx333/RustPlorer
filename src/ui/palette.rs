@@ -28,6 +28,7 @@ pub enum Command {
     OpenInExplorer,
     TogglePane,
     CloseArchive,
+    BatchRename,
 }
 
 impl Command {
@@ -42,6 +43,7 @@ impl Command {
         Command::DeleteSelected,
         Command::CopyPath,
         Command::OpenInExplorer,
+        Command::BatchRename,
         Command::TogglePane,
         Command::ToggleHidden,
         Command::ToggleFolderSizes,
@@ -67,6 +69,7 @@ impl Command {
             Self::OpenInExplorer => "Open in Windows Explorer",
             Self::TogglePane => "Toggle second pane",
             Self::CloseArchive => "Close archive",
+            Self::BatchRename => "Batch rename files",
         }
     }
 
@@ -81,6 +84,7 @@ impl Command {
             Self::OpenSettings => Some("Ctrl+,"),
             Self::DeleteSelected => Some("Delete"),
             Self::TogglePane => Some("Ctrl+F6"),
+            Self::BatchRename => Some("F2"),
             _ => None,
         }
     }
@@ -103,6 +107,7 @@ impl Command {
             Self::OpenInExplorer => "windows shell native",
             Self::TogglePane => "split dual second panel",
             Self::CloseArchive => "exit zip leave",
+            Self::BatchRename => "rename multiple bulk pattern numbering",
         }
     }
 
