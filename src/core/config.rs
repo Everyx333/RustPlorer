@@ -151,7 +151,134 @@ fn aggressive_walks(cpus: usize) -> usize {
     cpus.clamp(4, 16)
 }
 
-/// Appearance settings. Extended with full theming in a later phase.
+/// A named colour theme.
+///
+/// Colours are stored as hex strings rather than egui types so the config file
+/// stays human-editable and independent of the GUI library's version.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Theme {
+    pub name: String,
+    /// Window and panel background.
+    pub background: String,
+    /// Panel / sidebar background.
+    pub panel: String,
+    pub text: String,
+    /// Selection and active highlights.
+    pub accent: String,
+    /// Alternating row tint.
+    pub stripe: String,
+    pub warning: String,
+    pub error: String,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+impl Theme {
+    pub fn dark() -> Self {
+        Self {
+            name: "Dark".into(),
+            background: "#1e1e1e".into(),
+            panel: "#252526".into(),
+            text: "#d4d4d4".into(),
+            accent: "#0e639c".into(),
+            stripe: "#2a2a2b".into(),
+            warning: "#dc8c3c".into(),
+            error: "#dc5050".into(),
+        }
+    }
+
+    pub fn light() -> Self {
+        Self {
+            name: "Light".into(),
+            background: "#ffffff".into(),
+            panel: "#f3f3f3".into(),
+            text: "#1e1e1e".into(),
+            accent: "#0078d4".into(),
+            stripe: "#f8f8f8".into(),
+            warning: "#b8860b".into(),
+            error: "#c42b1c".into(),
+        }
+    }
+
+    /// High-contrast, for readability rather than aesthetics.
+    pub fn high_contrast() -> Self {
+        Self {
+            name: "High contrast".into(),
+            background: "#000000".into(),
+            panel: "#0a0a0a".into(),
+            text: "#ffffff".into(),
+            accent: "#ffff00".into(),
+            stripe: "#141414".into(),
+            warning: "#ffaa00".into(),
+            error: "#ff4444".into(),
+        }
+    }
+
+    pub fn nord() -> Self {
+        Self {
+            name: "Nord".into(),
+            background: "#2e3440".into(),
+            panel: "#3b4252".into(),
+            text: "#eceff4".into(),
+            accent: "#88c0d0".into(),
+            stripe: "#353c4a".into(),
+            warning: "#ebcb8b".into(),
+            error: "#bf616a".into(),
+        }
+    }
+
+    pub fn solarized_dark() -> Self {
+        Self {
+            name: "Solarized Dark".into(),
+            background: "#002b36".into(),
+            panel: "#073642".into(),
+            text: "#93a1a1".into(),
+            accent: "#268bd2".into(),
+            stripe: "#01313d".into(),
+            warning: "#b58900".into(),
+            error: "#dc322f".into(),
+        }
+    }
+
+    /// Every built-in theme.
+    pub fn builtins() -> Vec<Theme> {
+        vec![
+            Self::dark(),
+            Self::light(),
+            Self::nord(),
+            Self::solarized_dark(),
+            Self::high_contrast(),
+        ]
+    }
+}
+
+/// Parse `#rrggbb` into RGB bytes.
+///
+/// Returns `None` on malformed input so a hand-edited config with a typo falls
+/// back to a default colour rather than failing to load.
+pub fn parse_hex(hex: &str) -> Option<(u8, u8, u8)> {
+    let h = hex.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    Some((
+        u8::from_str_radix(&h[0..2], 16).ok()?,
+        u8::from_str_radix(&h[2..4], 16).ok()?,
+        u8::from_str_radix(&h[4..6], 16).ok()?,
+    ))
+}
+
+/// Format RGB bytes as `#rrggbb`.
+pub fn to_hex(r: u8, g: u8, b: u8) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Appearance settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppearanceConfig {
@@ -162,6 +289,10 @@ pub struct AppearanceConfig {
     pub row_spacing: f32,
     pub row_height: f32,
     pub striped_rows: bool,
+    /// Active colour theme.
+    pub theme: Theme,
+    /// Use a monospace font for the listing.
+    pub monospace_listing: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -172,6 +303,8 @@ impl Default for AppearanceConfig {
             row_spacing: 1.0,
             row_height: 24.0,
             striped_rows: true,
+            theme: Theme::dark(),
+            monospace_listing: false,
         }
     }
 }
@@ -447,6 +580,60 @@ mod tests {
         assert_eq!(cfg.appearance.font_size, 20.0);
         assert!(cfg.behavior.live_refresh, "missing field should default");
         assert!(cfg.performance.folder_sizes_enabled);
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn hex_parsing_round_trips() {
+        assert_eq!(parse_hex("#1e1e1e"), Some((0x1e, 0x1e, 0x1e)));
+        assert_eq!(parse_hex("1e1e1e"), Some((0x1e, 0x1e, 0x1e)));
+        assert_eq!(to_hex(0x1e, 0x1e, 0x1e), "#1e1e1e");
+    }
+
+    #[test]
+    fn malformed_hex_is_rejected_not_panicking() {
+        // A hand-edited config with a typo must not take the app down.
+        assert_eq!(parse_hex("#xyz"), None);
+        assert_eq!(parse_hex(""), None);
+        assert_eq!(parse_hex("#12345"), None);
+        assert_eq!(parse_hex("#gggggg"), None);
+    }
+
+    #[test]
+    fn every_builtin_theme_has_valid_colours() {
+        for theme in Theme::builtins() {
+            assert!(!theme.name.is_empty());
+            for (field, value) in [
+                ("background", &theme.background),
+                ("panel", &theme.panel),
+                ("text", &theme.text),
+                ("accent", &theme.accent),
+                ("stripe", &theme.stripe),
+                ("warning", &theme.warning),
+                ("error", &theme.error),
+            ] {
+                assert!(
+                    parse_hex(value).is_some(),
+                    "theme '{}' has an invalid {field}: {value}",
+                    theme.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn theme_persists() {
+        let p = tmp_path("theme.json");
+        let _ = std::fs::remove_file(&p);
+
+        let mut cfg = Config::default();
+        cfg.appearance.theme = Theme::nord();
+        cfg.save(Some(&p)).unwrap();
+
+        let loaded = Config::load(Some(&p));
+        assert_eq!(loaded.appearance.theme.name, "Nord");
+        assert_eq!(loaded.appearance.theme.background, "#2e3440");
 
         let _ = std::fs::remove_file(&p);
     }
