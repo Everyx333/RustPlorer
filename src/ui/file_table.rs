@@ -269,8 +269,8 @@ fn sort_header(
 ) -> egui::Response {
     let arrow = if app.sort_key == key {
         match app.sort_order {
-            crate::fs::entry::SortOrder::Ascending => " ▲",
-            crate::fs::entry::SortOrder::Descending => " ▼",
+            crate::fs::entry::SortOrder::Ascending => " ⬆",
+            crate::fs::entry::SortOrder::Descending => " ⬇",
         }
     } else {
         ""
@@ -328,7 +328,7 @@ fn draw_toolbar(
             }
         });
 
-        if ui.button("▲").on_hover_text("Up (Alt+Up)").clicked() {
+        if ui.button("⬆").on_hover_text("Up (Alt+Up)").clicked() {
             app.go_up();
         }
 
@@ -424,7 +424,7 @@ fn draw_second_pane(app: &mut RustPlorer, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         // A visible focus marker matters here: keyboard actions target the
         // focused pane, so "which side am I on?" must be unambiguous.
-        let dot = if focused { "●" } else { "○" };
+        let dot = if focused { "⚫" } else { "○" };
         if ui
             .small_button(format!("{dot} Pane 2"))
             .on_hover_text("Click to focus this pane (F6)")
@@ -433,7 +433,7 @@ fn draw_second_pane(app: &mut RustPlorer, ui: &mut egui::Ui) {
             focus_here = true;
         }
 
-        if ui.small_button("▲").on_hover_text("Up").clicked() {
+        if ui.small_button("⬆").on_hover_text("Up").clicked() {
             if let Some(tab) = &app.right_tab {
                 if let Some(parent) = tab.path.parent() {
                     navigate_right = Some(parent.to_path_buf());
