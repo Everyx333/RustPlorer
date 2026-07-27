@@ -87,6 +87,12 @@ pub struct RustPlorer {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
 
+    /// Second pane's tab. Owns its own location and history, so the two panes
+    /// browse independently -- the point of a dual-pane manager.
+    pub right_tab: Option<Tab>,
+    /// Which pane has focus. Navigation and shortcuts apply to this one.
+    pub right_focused: bool,
+
     pub drives: Vec<PathBuf>,
     pub quick_access: Vec<(String, PathBuf)>,
 
@@ -108,6 +114,8 @@ pub struct RustPlorer {
     pub config: Config,
     /// Whether the second pane is visible.
     pub dual_pane: bool,
+    /// Text box contents for naming a new workspace.
+    pub workspace_name_input: String,
     pub settings_open: bool,
     pub settings_tab: SettingsTab,
     /// First-run prompt offering to install 7-Zip or WinRAR.
@@ -159,6 +167,8 @@ impl RustPlorer {
             quick_access: quick_access(),
             tabs: vec![Tab::new(start_dir)],
             active_tab: 0,
+            right_tab: None,
+            right_focused: false,
             archive_location: None,
             archives: ArchiveBrowser::new(),
             sizer,
@@ -168,6 +178,7 @@ impl RustPlorer {
             op_status: None,
             error_banner: None,
             dual_pane: false,
+            workspace_name_input: String::new(),
             settings_open: false,
             settings_tab: SettingsTab::Performance,
             first_run_stage: FirstRunStage::Hidden,
@@ -317,9 +328,181 @@ impl RustPlorer {
     }
 
     /// Show or hide the second pane.
+    ///
+    /// The new pane opens at the current location, which is what you almost
+    /// always want: split, then navigate one side to the destination.
     pub fn toggle_second_pane(&mut self) {
         self.dual_pane = !self.dual_pane;
+
+        if self.dual_pane && self.right_tab.is_none() {
+            let start = self.active().path.clone();
+            let mut tab = Tab::new(start.clone());
+            tab.state = LoadState::Loaded;
+            // Copy the current listing rather than rescanning: the data is
+            // already in memory and identical.
+            tab.entries = self.active().entries.clone();
+            self.right_tab = Some(tab);
+        }
+
+        if !self.dual_pane {
+            // Focus must return to the left pane, or shortcuts would target a
+            // pane that is no longer visible.
+            self.right_focused = false;
+        }
+
         tracing::debug!(enabled = self.dual_pane, "dual pane toggled");
+    }
+
+    /// Navigate the second pane.
+    ///
+    /// Scans synchronously off a dedicated read rather than the shared
+    /// scanner channel, which is keyed to the active tab. The second pane is a
+    /// destination picker, so a simple bounded read is the right trade.
+    pub fn navigate_right_pane(&mut self, path: PathBuf) {
+        let show_hidden = self.show_hidden;
+
+        let Some(tab) = &mut self.right_tab else { return };
+        tab.push_history(path.clone());
+        tab.path = path.clone();
+        tab.selected = None;
+        tab.entries.clear();
+        tab.state = LoadState::Loading;
+
+        // Read directly. Second-pane directories are browsed deliberately, and
+        // this keeps the pane's state independent of the main scanner.
+        let mut entries = Vec::new();
+        if let Ok(read) = std::fs::read_dir(&path) {
+            for dir_entry in read.flatten() {
+                let Ok(meta) = dir_entry.metadata() else {
+                    continue;
+                };
+                let entry = Entry::from_metadata(dir_entry.path(), &meta);
+                if entry.is_hidden && !show_hidden {
+                    continue;
+                }
+                entries.push(entry);
+            }
+        }
+
+        let (key, order) = (self.sort_key, self.sort_order);
+        sort_entries(&mut entries, key, order);
+
+        if let Some(tab) = &mut self.right_tab {
+            tab.entries = entries;
+            tab.state = LoadState::Loaded;
+        }
+    }
+
+    /// Save the current pane arrangement under a name.
+    pub fn save_workspace(&mut self, name: String) {
+        let ws = crate::core::config::Workspace {
+            name: name.clone(),
+            left_path: self.tabs[self.active_tab].path.clone(),
+            right_path: self.right_tab.as_ref().map(|t| t.path.clone()),
+            dual_pane: self.dual_pane,
+        };
+
+        // Overwrite an existing workspace with the same name rather than
+        // silently creating a duplicate the user cannot tell apart.
+        if let Some(existing) = self.config.workspaces.iter_mut().find(|w| w.name == name) {
+            *existing = ws;
+        } else {
+            self.config.workspaces.push(ws);
+        }
+
+        self.config_dirty = true;
+        tracing::info!(%name, "workspace saved");
+    }
+
+    /// Restore a saved arrangement.
+    pub fn load_workspace(&mut self, name: &str) {
+        let Some(ws) = self.config.workspaces.iter().find(|w| w.name == name).cloned() else {
+            return;
+        };
+
+        self.dual_pane = ws.dual_pane;
+
+        if let Some(right) = ws.right_path {
+            // Create the pane but do NOT scan it yet -- it is populated when
+            // navigated to, keeping restore cost flat regardless of how many
+            // panes were saved.
+            let mut tab = Tab::new(right);
+            tab.state = LoadState::Loading;
+            self.right_tab = Some(tab);
+        } else {
+            self.right_tab = None;
+        }
+
+        // Only the active pane scans eagerly.
+        self.navigate(ws.left_path, true);
+
+        if self.dual_pane {
+            if let Some(path) = self.right_tab.as_ref().map(|t| t.path.clone()) {
+                self.navigate_right_pane(path);
+            }
+        }
+
+        tracing::info!(%name, "workspace restored");
+    }
+
+    /// Delete a saved workspace.
+    pub fn delete_workspace(&mut self, name: &str) {
+        self.config.workspaces.retain(|w| w.name != name);
+        self.config_dirty = true;
+    }
+
+    /// Move focus between panes.
+    pub fn focus_other_pane(&mut self) {
+        if self.dual_pane {
+            self.right_focused = !self.right_focused;
+        }
+    }
+
+    /// Copy the selection from the focused pane to the other pane's folder.
+    ///
+    /// This is the core dual-pane workflow: two locations on screen, one key
+    /// to move between them.
+    pub fn transfer_to_other_pane(&mut self, move_files: bool) {
+        if !self.dual_pane {
+            return;
+        }
+        if self.in_archive() {
+            self.error_banner =
+                Some("Cannot copy out of an archive yet.".to_string());
+            return;
+        }
+
+        let (source, dest) = if self.right_focused {
+            let Some(right) = &self.right_tab else { return };
+            (right.selected.and_then(|i| right.entries.get(i)).cloned(),
+             self.tabs[self.active_tab].path.clone())
+        } else {
+            let left = &self.tabs[self.active_tab];
+            let Some(right) = &self.right_tab else { return };
+            (left.selected.and_then(|i| left.entries.get(i)).cloned(),
+             right.path.clone())
+        };
+
+        let Some(entry) = source else {
+            self.error_banner = Some("Nothing selected.".to_string());
+            return;
+        };
+
+        let op = if move_files {
+            FileOp::Move {
+                sources: vec![entry.path.clone()],
+                dest_dir: dest,
+                policy: crate::fs::ops::ConflictPolicy::Rename,
+            }
+        } else {
+            FileOp::Copy {
+                sources: vec![entry.path.clone()],
+                dest_dir: dest,
+                policy: crate::fs::ops::ConflictPolicy::Rename,
+            }
+        };
+
+        self.submit_op(op);
     }
 
     /// Preview the selected file.
@@ -899,8 +1082,18 @@ fn handle_shortcuts(app: &mut RustPlorer, ctx: &egui::Context) {
     if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         app.toggle_preview();
     }
-    if ctx.input(|i| i.key_pressed(egui::Key::F6)) {
+    // F6 switches panes (matching Explorer and most dual-pane managers);
+    // Ctrl+F6 shows or hides the second pane.
+    if ctx.input(|i| i.key_pressed(egui::Key::F6) && i.modifiers.ctrl) {
         app.toggle_second_pane();
+    } else if ctx.input(|i| i.key_pressed(egui::Key::F6)) {
+        app.focus_other_pane();
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::F5) && i.modifiers.ctrl) {
+        app.transfer_to_other_pane(false);
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::F6) && i.modifiers.shift) {
+        app.transfer_to_other_pane(true);
     }
     if delete {
         app.trash_selected();
