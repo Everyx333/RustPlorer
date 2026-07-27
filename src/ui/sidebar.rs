@@ -89,7 +89,7 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                 for name in &saved {
                     ui.horizontal(|ui| {
                         if ui
-                            .small_button(format!("⬒ {name}"))
+                            .small_button(format!("▣ {name}"))
                             .on_hover_text("Restore this layout")
                             .clicked()
                         {
