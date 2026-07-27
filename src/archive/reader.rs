@@ -351,6 +351,28 @@ mod tests {
     }
 
     #[test]
+    fn archive_directory_sizes_roll_up() {
+        // Regression: folders inside an archive showed "…" forever because the
+        // size column consulted the filesystem sizer cache with a path that is
+        // relative to the archive, so it never hit. The size is known here at
+        // listing time and must be carried on the entry itself.
+        let all = vec![
+            entry("pkg/a.txt", false, 100),
+            entry("pkg/sub/b.txt", false, 250),
+            entry("pkg/sub/c.txt", false, 150),
+        ];
+
+        let root = entries_in_dir(&all, "");
+        let pkg = root.iter().find(|e| e.path == "pkg").expect("pkg dir");
+        assert!(pkg.is_dir);
+        assert_eq!(pkg.size, 500, "directory size must include nested files");
+
+        let inside = entries_in_dir(&all, "pkg");
+        let sub = inside.iter().find(|e| e.path == "sub").expect("sub dir");
+        assert_eq!(sub.size, 400, "nested directory size must roll up");
+    }
+
+    #[test]
     fn unsupported_extension_errors() {
         assert!(list_entries(Path::new("notes.txt")).is_err());
     }
