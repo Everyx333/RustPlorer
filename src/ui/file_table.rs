@@ -12,6 +12,7 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::archive::format::ArchiveFormat;
 use crate::fs::entry::{EntryKind, SortKey};
+use crate::fs::thumbs::ThumbState;
 use crate::ui::app::{LoadState, RustPlorer};
 
 pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
@@ -144,15 +145,51 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                     row.set_selected(selected == Some(entry_idx));
 
                     row.col(|ui| {
-                        let icon = match entry.kind {
-                            EntryKind::Directory => "📁",
-                            EntryKind::Symlink => "🔗",
-                            // Archives read as folders, so they get their own
-                            // glyph to signal they can be entered.
-                            EntryKind::File if ArchiveFormat::is_archive(&entry.path) => "📦",
-                            EntryKind::File => "📄",
-                        };
-                        let text = egui::RichText::new(format!("{icon} {}", entry.name));
+                        // Try a real thumbnail for images; fall back to the
+                        // type glyph while one is generating or unavailable.
+                        let mut drew_thumb = false;
+
+                        if !in_archive && entry.kind == EntryKind::File {
+                            if let Some(ThumbState::Ready(t)) =
+                                app.thumbnail_for(&entry.path)
+                            {
+                                let tex = ui.ctx().load_texture(
+                                    format!("thumb:{}", entry.path.display()),
+                                    egui::ColorImage::from_rgba_unmultiplied(
+                                        [t.width as usize, t.height as usize],
+                                        &t.pixels,
+                                    ),
+                                    egui::TextureOptions::LINEAR,
+                                );
+
+                                // Scale to the row so tall images do not
+                                // stretch the table.
+                                let h = (row_height - 4.0).max(8.0);
+                                let w = h * (t.width as f32 / t.height.max(1) as f32);
+                                ui.add(egui::Image::new(&tex).fit_to_exact_size(
+                                    egui::vec2(w, h),
+                                ));
+                                drew_thumb = true;
+                            }
+                        }
+
+                        if !drew_thumb {
+                            let icon = match entry.kind {
+                                EntryKind::Directory => "📁",
+                                EntryKind::Symlink => "🔗",
+                                // Archives read as folders, so they get their
+                                // own glyph to signal they can be entered.
+                                EntryKind::File
+                                    if ArchiveFormat::is_archive(&entry.path) =>
+                                {
+                                    "📦"
+                                }
+                                EntryKind::File => "📄",
+                            };
+                            ui.label(icon);
+                        }
+
+                        let text = egui::RichText::new(&entry.name);
                         let text = if entry.is_hidden { text.weak() } else { text };
                         ui.add(egui::Label::new(text).truncate().selectable(false));
                     });
