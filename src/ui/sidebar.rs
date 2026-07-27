@@ -5,6 +5,7 @@ use crate::ui::app::RustPlorer;
 pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
     // Deferred so we don't mutate `app` while borrowing its lists.
     let mut navigate_to = None;
+    let mut settings_changed = false;
 
     egui::SidePanel::left("sidebar")
         .resizable(true)
@@ -47,19 +48,30 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                     app.toggle_hidden();
                 }
 
-                let mut sizes = app.compute_folder_sizes;
+                let mut sizes = app.config.performance.folder_sizes_enabled;
                 if ui
                     .checkbox(&mut sizes, "Folder sizes")
                     .on_hover_text(
                         "Calculate folder sizes in the background.\n\
-                         Turn off for very slow network drives.",
+                         Configure concurrency in Settings > Performance.",
                     )
                     .changed()
                 {
-                    app.compute_folder_sizes = sizes;
+                    app.config.performance.folder_sizes_enabled = sizes;
                     if !sizes {
                         app.sizer.clear();
                     }
+                    settings_changed = true;
+                }
+
+                ui.add_space(8.0);
+
+                if ui
+                    .button("⚙ Settings")
+                    .on_hover_text("Open settings (Ctrl+,)")
+                    .clicked()
+                {
+                    app.settings_open = true;
                 }
 
                 if ui
@@ -72,6 +84,9 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
             });
         });
 
+    if settings_changed {
+        app.config_changed();
+    }
     if let Some(path) = navigate_to {
         app.navigate(path, true);
     }
