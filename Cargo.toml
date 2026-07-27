@@ -24,6 +24,17 @@ eframe = { version = "0.33", default-features = false, features = [
 ] }
 egui = "0.33"
 egui_extras = { version = "0.33", features = ["image"] }
+# Explicit dependency for thumbnail generation. Only the codecs we actually
+# decode are enabled -- default features pull in a dozen more formats and the
+# binary size that comes with them.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "webp",
+    "ico",
+] }
 
 # Concurrency and filesystem
 jwalk = "0.8"
