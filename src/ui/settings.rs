@@ -185,13 +185,6 @@ fn performance_tab(app: &mut RustPlorer, ui: &mut egui::Ui) -> bool {
         );
     }
 
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(8.0);
-
-    ui.label(egui::RichText::new("Folder sizes").strong());
-    ui.add_space(4.0);
-
     if ui
         .checkbox(
             &mut app.config.performance.folder_sizes_enabled,
@@ -205,6 +198,54 @@ fn performance_tab(app: &mut RustPlorer, ui: &mut egui::Ui) -> bool {
             app.sizer.clear();
         }
     }
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    ui.label(egui::RichText::new("Thumbnails").strong());
+    ui.add_space(4.0);
+
+    if ui
+        .checkbox(
+            &mut app.config.performance.thumbnails_enabled,
+            "Show image thumbnails",
+        )
+        .on_hover_text("Generate small previews for image files in the listing.")
+        .changed()
+    {
+        changed = true;
+    }
+
+    let mut mb = app.config.performance.thumbnail_cache_mb;
+    if ui
+        .add(egui::Slider::new(&mut mb, 8..=512).text("Thumbnail memory (MB)"))
+        .on_hover_text(
+            "Hard ceiling on thumbnail memory.\n\
+             Oldest thumbnails are discarded when the limit is reached.",
+        )
+        .changed()
+    {
+        app.config.performance.thumbnail_cache_mb = mb;
+        changed = true;
+    }
+
+    ui.label(
+        egui::RichText::new(format!(
+            "Currently using {} across {} cached items",
+            humansize::format_size(app.thumbs.bytes_used() as u64, humansize::DECIMAL),
+            app.thumbs.len()
+        ))
+        .weak()
+        .small(),
+    );
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    ui.label(egui::RichText::new("Folder sizes").strong());
+    ui.add_space(4.0);
 
     let mut look = app.config.performance.size_lookahead_rows;
     if ui
