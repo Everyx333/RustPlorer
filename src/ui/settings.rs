@@ -307,29 +307,86 @@ fn behavior_tab(app: &mut RustPlorer, ui: &mut egui::Ui) -> bool {
 }
 
 fn appearance_tab(app: &mut RustPlorer, ui: &mut egui::Ui) -> bool {
+    use crate::core::config::{parse_hex, to_hex, Theme};
+
     let mut changed = false;
 
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Theme").strong());
     ui.add_space(4.0);
 
-    let current = app.config.appearance.dark_mode;
-    for (label, value) in [
-        ("Follow system", None),
-        ("Dark", Some(true)),
-        ("Light", Some(false)),
-    ] {
-        if ui.radio(current == value, label).clicked() && current != value {
-            app.config.appearance.dark_mode = value;
-            changed = true;
+    // Built-in presets. Selecting one replaces the whole colour set.
+    ui.horizontal_wrapped(|ui| {
+        for theme in Theme::builtins() {
+            let active = app.config.appearance.theme.name == theme.name;
+            if ui.selectable_label(active, &theme.name).clicked() && !active {
+                app.config.appearance.theme = theme;
+                changed = true;
+            }
+        }
+    });
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    ui.label(egui::RichText::new("Colors").strong());
+    ui.label(
+        egui::RichText::new("Editing a color switches the theme to Custom.")
+            .weak()
+            .small(),
+    );
+    ui.add_space(6.0);
+
+    // Individual colour pickers. egui works in RGB bytes; the config stores
+    // hex so the file stays readable and hand-editable.
+    let mut edited = false;
+    {
+        let t = &mut app.config.appearance.theme;
+
+        for (label, field) in [
+            ("Background", &mut t.background),
+            ("Panel", &mut t.panel),
+            ("Text", &mut t.text),
+            ("Accent", &mut t.accent),
+            ("Stripe", &mut t.stripe),
+            ("Warning", &mut t.warning),
+            ("Error", &mut t.error),
+        ] {
+            ui.horizontal(|ui| {
+                let (r, g, b) = parse_hex(field).unwrap_or((128, 128, 128));
+                let mut rgb = [r, g, b];
+
+                if ui.color_edit_button_srgb(&mut rgb).changed() {
+                    *field = to_hex(rgb[0], rgb[1], rgb[2]);
+                    edited = true;
+                }
+
+                ui.label(label);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(field.as_str()).monospace().small().weak());
+                });
+            });
         }
     }
 
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(8.0);
+    if edited {
+        // Mark the theme as no longer a stock preset, so the preset row does
+        // not falsely claim the built-in is still active.
+        if Theme::builtins()
+            .iter()
+            .any(|b| b.name == app.config.appearance.theme.name)
+        {
+            app.config.appearance.theme.name = "Custom".to_string();
+        }
+        changed = true;
+    }
 
-    ui.label(egui::RichText::new("Layout").strong());
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    ui.label(egui::RichText::new("Typography and layout").strong());
     ui.add_space(4.0);
 
     let a = &mut app.config.appearance;
@@ -345,58 +402,95 @@ fn appearance_tab(app: &mut RustPlorer, ui: &mut egui::Ui) -> bool {
         .on_hover_text("Multiplier on default widget spacing. Lower is denser.")
         .changed();
     changed |= ui.checkbox(&mut a.striped_rows, "Striped rows").changed();
+    changed |= ui
+        .checkbox(&mut a.monospace_listing, "Monospace font")
+        .on_hover_text("Useful when names contain aligned numbers or hashes.")
+        .changed();
 
     ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if ui.button("Reset appearance to defaults").clicked() {
         app.config.appearance = crate::core::config::AppearanceConfig::default();
         changed = true;
     }
-
-    ui.add_space(12.0);
-    ui.label(
-        egui::RichText::new(
-            "Full theming — custom colors and font families — arrives in a later update.",
-        )
-        .weak()
-        .italics(),
-    );
 
     changed
 }
 
 fn keybindings_tab(ui: &mut egui::Ui) {
     ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new("Customizable keybindings are coming in a later update.")
-            .weak()
-            .italics(),
-    );
-    ui.add_space(10.0);
-
-    ui.label(egui::RichText::new("Current shortcuts").strong());
+    ui.label(egui::RichText::new("Keyboard shortcuts").strong());
     ui.add_space(6.0);
 
-    egui::Grid::new("keybinds")
-        .num_columns(2)
-        .spacing([32.0, 6.0])
-        .striped(true)
-        .show(ui, |ui| {
-            for (keys, action) in [
-                ("Ctrl + F", "Focus the filter box"),
-                ("F5", "Refresh"),
+    let groups: [(&str, &[(&str, &str)]); 4] = [
+        (
+            "Navigation",
+            &[
                 ("Alt + ⬅", "Back"),
                 ("Alt + ➡", "Forward"),
                 ("Alt + ⬆ / Backspace", "Up one folder"),
-                ("Delete", "Send to Recycle Bin"),
-                ("Ctrl + ,", "Open settings"),
-                ("Escape", "Clear filter / dismiss message"),
+                ("F5", "Refresh"),
                 ("Enter / Double-click", "Open"),
-            ] {
-                ui.label(egui::RichText::new(keys).monospace().strong());
-                ui.label(action);
-                ui.end_row();
-            }
-        });
+            ],
+        ),
+        (
+            "Panes",
+            &[
+                ("Ctrl + F6", "Show or hide the second pane"),
+                ("F6", "Switch focus between panes"),
+                ("Ctrl + F5", "Copy selection to the other pane"),
+                ("Shift + F6", "Move selection to the other pane"),
+            ],
+        ),
+        (
+            "Files",
+            &[
+                ("F2", "Batch rename"),
+                ("Delete", "Send to Recycle Bin"),
+                ("Space", "Quick preview"),
+                ("Ctrl + F", "Filter files"),
+            ],
+        ),
+        (
+            "Application",
+            &[
+                ("Ctrl + Shift + P", "Command palette"),
+                ("Ctrl + ,", "Settings"),
+                ("Escape", "Clear filter / dismiss message"),
+            ],
+        ),
+    ];
+
+    for (group, binds) in groups {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(group).strong().small());
+        ui.add_space(2.0);
+
+        egui::Grid::new(format!("keys_{group}"))
+            .num_columns(2)
+            .spacing([28.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for (keys, action) in binds {
+                    ui.label(egui::RichText::new(*keys).monospace().small());
+                    ui.label(egui::RichText::new(*action).small());
+                    ui.end_row();
+                }
+            });
+    }
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(
+            "Remappable shortcuts are not implemented yet. Every action above \n\
+             is also reachable from the command palette (Ctrl + Shift + P), \n\
+             which needs no binding.",
+        )
+        .weak()
+        .small()
+        .italics(),
+    );
 }
 
 fn archives_tab(app: &mut RustPlorer, ui: &mut egui::Ui) -> bool {
