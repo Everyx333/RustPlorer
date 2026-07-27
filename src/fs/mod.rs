@@ -2,6 +2,7 @@
 
 pub mod entry;
 pub mod ops;
+pub mod rename;
 pub mod scanner;
 pub mod search;
 pub mod sizer;
