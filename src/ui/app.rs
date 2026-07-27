@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::core::config::Config;
 use crate::core::logging::Diagnostics;
 use crate::core::paths::AppPaths;
 use crate::core::task::WorkerPool;
@@ -11,6 +12,7 @@ use crate::fs::scanner::{quick_access, ScanUpdate, Scanner};
 use crate::fs::search::SearchFilter;
 use crate::fs::sizer::{FolderSizer, SizeState};
 use crate::fs::watcher::DirWatcher;
+use crate::ui::settings::SettingsTab;
 
 /// Status of the directory currently being displayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,9 +96,15 @@ pub struct RustPlorer {
     /// Last error, shown as a dismissible banner.
     pub error_banner: Option<String>,
 
-    /// Whether to compute folder sizes. On by default -- it is the feature
-    /// Explorer lacks -- but switchable for very slow network drives.
-    pub compute_folder_sizes: bool,
+    /// Persistent user settings.
+    pub config: Config,
+    pub settings_open: bool,
+    pub settings_tab: SettingsTab,
+    /// Set when config changes, so we save once on a debounce rather than
+    /// writing to disk on every slider tick.
+    config_dirty: bool,
+    last_config_save: std::time::Instant,
+
     /// Focus the search box on the next frame (set by Ctrl+F).
     pub focus_search: bool,
 
@@ -111,15 +119,24 @@ pub struct RustPlorer {
 
 impl RustPlorer {
     pub fn new(paths: AppPaths, diagnostics: Diagnostics) -> Self {
-        // Cap worker count. On a 32-core machine an uncapped pool would run 32
-        // concurrent scans and thrash the disk queue rather than going faster.
-        let worker_count = std::thread::available_parallelism()
-            .map(|n| n.get().min(8))
-            .unwrap_or(4);
+        let config = Config::load(paths.config_file().as_deref());
 
-        let start_dir = directories::UserDirs::new()
-            .map(|d| d.home_dir().to_path_buf())
+        // Worker count comes from the performance profile, which scales with
+        // the machine rather than a fixed cap.
+        let worker_count = config.performance.effective_workers();
+
+        // Honour "reopen last folder", falling back to home.
+        let start_dir = config
+            .behavior
+            .restore_last_path
+            .then(|| config.behavior.last_path.clone())
+            .flatten()
+            .filter(|p| p.is_dir())
+            .or_else(|| directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
+
+        let sizer = FolderSizer::new();
+        sizer.set_max_concurrent(config.performance.effective_size_walks());
 
         Self {
             pool: WorkerPool::new(worker_count),
@@ -128,18 +145,22 @@ impl RustPlorer {
             quick_access: quick_access(),
             tabs: vec![Tab::new(start_dir)],
             active_tab: 0,
-            sizer: FolderSizer::new(),
+            sizer,
             search: SearchFilter::new(),
             watcher: DirWatcher::new(),
             ops: OpRunner::new(),
             op_status: None,
             error_banner: None,
-            compute_folder_sizes: true,
+            settings_open: false,
+            settings_tab: SettingsTab::Performance,
+            config_dirty: false,
+            last_config_save: std::time::Instant::now(),
             focus_search: false,
             sort_key: SortKey::Name,
             sort_order: SortOrder::Ascending,
-            show_hidden: false,
+            show_hidden: config.behavior.show_hidden,
             first_frame_done: false,
+            config,
             paths,
             diagnostics,
         }
@@ -176,7 +197,11 @@ impl RustPlorer {
 
         // Watch the new location for live updates, and invalidate any active
         // filter since it refers to the previous listing.
-        self.watcher.watch(path);
+        if self.config.behavior.live_refresh {
+            self.watcher.watch(path);
+        } else {
+            self.watcher.stop();
+        }
         self.search.invalidate();
     }
 
@@ -186,7 +211,7 @@ impl RustPlorer {
     /// visible is what keeps this affordable in a folder with thousands of
     /// subdirectories.
     pub fn request_visible_sizes(&mut self, visible: std::ops::Range<usize>) {
-        if !self.compute_folder_sizes {
+        if !self.config.performance.folder_sizes_enabled {
             return;
         }
 
@@ -224,6 +249,66 @@ impl RustPlorer {
             self.sizer.clear();
             self.refresh();
         }
+    }
+
+    /// Persist config, debounced.
+    ///
+    /// Dragging a slider fires `changed()` every frame; writing the file each
+    /// time would mean hundreds of disk writes for one adjustment.
+    fn maybe_save_config(&mut self) {
+        if !self.config_dirty {
+            return;
+        }
+        if self.last_config_save.elapsed() < std::time::Duration::from_millis(800) {
+            return;
+        }
+
+        self.config_dirty = false;
+        self.last_config_save = std::time::Instant::now();
+
+        // Record the current folder so it can be restored next launch.
+        if self.config.behavior.restore_last_path {
+            self.config.behavior.last_path = Some(self.active().path.clone());
+        }
+
+        if let Err(e) = self.config.save(self.paths.config_file().as_deref()) {
+            tracing::warn!(error = %e, "could not save config");
+        }
+    }
+
+    /// Mark config as needing a save, and apply anything that takes effect
+    /// immediately.
+    pub fn config_changed(&mut self) {
+        self.config_dirty = true;
+
+        // Concurrency applies live; worker count needs a restart.
+        self.sizer
+            .set_max_concurrent(self.config.performance.effective_size_walks());
+
+        if self.show_hidden != self.config.behavior.show_hidden {
+            self.show_hidden = self.config.behavior.show_hidden;
+            self.refresh();
+        }
+    }
+
+    /// Apply appearance settings to the egui context.
+    fn apply_appearance(&self, ctx: &egui::Context) {
+        let a = &self.config.appearance;
+
+        if let Some(dark) = a.dark_mode {
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+        }
+
+        ctx.style_mut(|style| {
+            for (_, font) in style.text_styles.iter_mut() {
+                font.size = a.font_size;
+            }
+            style.spacing.item_spacing.y = 4.0 * a.row_spacing;
+        });
     }
 
     /// Fold in folder-size results.
@@ -407,6 +492,8 @@ impl RustPlorer {
 
     pub fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
+        self.config.behavior.show_hidden = self.show_hidden;
+        self.config_dirty = true;
         self.refresh();
     }
 
@@ -453,9 +540,16 @@ impl eframe::App for RustPlorer {
         self.tabs[self.active_tab].entries = entries;
 
         handle_shortcuts(self, ctx);
+        self.apply_appearance(ctx);
 
         crate::ui::sidebar::draw(self, ctx);
         crate::ui::file_table::draw(self, ctx);
+
+        if crate::ui::settings::draw(self, ctx) {
+            self.config_changed();
+        }
+
+        self.maybe_save_config();
 
         // Repaint while a scan is streaming so incoming batches are shown
         // promptly. When idle, egui sleeps — which is what keeps a file manager
@@ -465,7 +559,7 @@ impl eframe::App for RustPlorer {
         let busy = self.active().state == LoadState::Loading || self.op_status.is_some();
         if busy {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        } else if self.compute_folder_sizes {
+        } else if self.config.performance.folder_sizes_enabled {
             // Slower tick while folder sizes count up.
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -515,6 +609,9 @@ fn handle_shortcuts(app: &mut RustPlorer, ctx: &egui::Context) {
     }
     if ctrl_f {
         app.focus_search = true;
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::Comma) && i.modifiers.ctrl) {
+        app.settings_open = !app.settings_open;
     }
     if delete {
         app.trash_selected();
