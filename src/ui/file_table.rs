@@ -48,6 +48,18 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
         draw_status(app, ui);
     });
 
+    // Second pane. Drawn as a side panel so the splitter is draggable and the
+    // central panel simply takes the remaining space.
+    if app.dual_pane && app.right_tab.is_some() {
+        egui::SidePanel::right("second_pane")
+            .resizable(true)
+            .default_width(420.0)
+            .width_range(220.0..=1400.0)
+            .show(ctx, |ui| {
+                draw_second_pane(app, ui);
+            });
+    }
+
     egui::CentralPanel::default().show(ctx, |ui| {
         if let LoadState::Failed(err) = &app.active().state {
             ui.centered_and_justified(|ui| {
@@ -292,7 +304,7 @@ fn draw_searchbar(app: &mut RustPlorer, ui: &mut egui::Ui) {
             resp.request_focus();
         }
 
-        if app.search.is_active() && ui.small_button("✕").clicked() {
+        if app.search.is_active() && ui.small_button("✖").clicked() {
             app.search.clear();
         }
     });
@@ -396,4 +408,93 @@ fn draw_status(app: &RustPlorer, ui: &mut egui::Ui) {
             ui.label(format!("{} workers", app.pool.size()));
         });
     });
+}
+
+/// Draw the second pane: a simplified listing with its own location.
+///
+/// Deliberately lighter than the main table -- no folder sizing, no sort
+/// headers. Its job is to be a copy destination, not a second full browser,
+/// and doubling the sizing workload for that would be a poor trade.
+fn draw_second_pane(app: &mut RustPlorer, ui: &mut egui::Ui) {
+    let focused = app.right_focused;
+    let mut navigate_right: Option<std::path::PathBuf> = None;
+    let mut select: Option<usize> = None;
+    let mut focus_here = false;
+
+    ui.horizontal(|ui| {
+        // A visible focus marker matters here: keyboard actions target the
+        // focused pane, so "which side am I on?" must be unambiguous.
+        let dot = if focused { "●" } else { "○" };
+        if ui
+            .small_button(format!("{dot} Pane 2"))
+            .on_hover_text("Click to focus this pane (F6)")
+            .clicked()
+        {
+            focus_here = true;
+        }
+
+        if ui.small_button("▲").on_hover_text("Up").clicked() {
+            if let Some(tab) = &app.right_tab {
+                if let Some(parent) = tab.path.parent() {
+                    navigate_right = Some(parent.to_path_buf());
+                }
+            }
+        }
+    });
+
+    let Some(tab) = &app.right_tab else { return };
+
+    ui.label(
+        egui::RichText::new(tab.path.display().to_string())
+            .monospace()
+            .small()
+            .weak(),
+    );
+    ui.separator();
+
+    let row_height = app.config.appearance.row_height;
+    let entries = &tab.entries;
+    let selected = tab.selected;
+
+    egui::ScrollArea::vertical()
+        .id_salt("pane2_scroll")
+        .auto_shrink([false, false])
+        .show_rows(ui, row_height, entries.len(), |ui, range| {
+            for i in range {
+                let Some(entry) = entries.get(i) else { continue };
+
+                let icon = match entry.kind {
+                    EntryKind::Directory => "📁",
+                    EntryKind::Symlink => "🔗",
+                    EntryKind::File if ArchiveFormat::is_archive(&entry.path) => "📦",
+                    EntryKind::File => "📄",
+                };
+
+                let label = format!("{icon} {}", entry.name);
+                let resp = ui.add(
+                    egui::Button::selectable(selected == Some(i), label)
+                        .min_size(egui::vec2(ui.available_width(), row_height)),
+                );
+
+                if resp.clicked() {
+                    select = Some(i);
+                    focus_here = true;
+                }
+                if resp.double_clicked() && entry.is_dir() {
+                    navigate_right = Some(entry.path.clone());
+                }
+            }
+        });
+
+    if focus_here {
+        app.right_focused = true;
+    }
+    if let Some(i) = select {
+        if let Some(tab) = &mut app.right_tab {
+            tab.selected = Some(i);
+        }
+    }
+    if let Some(path) = navigate_right {
+        app.navigate_right_pane(path);
+    }
 }
