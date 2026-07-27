@@ -97,6 +97,13 @@ impl CancelToken {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// A token bound to a fresh generation, for tests and for synchronous
+    /// callers that have no pool. Never cancelled unless `cancel()` is called.
+    pub fn for_test(tracker: Generation) -> Self {
+        let current = tracker.current();
+        Self::new(current, tracker)
+    }
 }
 
 /// A unit of work executed on the pool.
