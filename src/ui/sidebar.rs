@@ -47,6 +47,21 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                     app.toggle_hidden();
                 }
 
+                let mut sizes = app.compute_folder_sizes;
+                if ui
+                    .checkbox(&mut sizes, "Folder sizes")
+                    .on_hover_text(
+                        "Calculate folder sizes in the background.\n\
+                         Turn off for very slow network drives.",
+                    )
+                    .changed()
+                {
+                    app.compute_folder_sizes = sizes;
+                    if !sizes {
+                        app.sizer.clear();
+                    }
+                }
+
                 if ui
                     .button("Copy diagnostics")
                     .on_hover_text("Copy version, environment, and recent logs to the clipboard")
