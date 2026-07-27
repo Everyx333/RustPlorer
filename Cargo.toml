@@ -1,0 +1,69 @@
+[package]
+name = "rustplorer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A fast, lightweight file manager for Windows"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+
+[target.'cfg(not(windows))'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence", "x11", "wayland"] }
+egui = "0.33"
+egui_extras = { version = "0.33", features = ["image"] }
+
+jwalk = "0.8"
+notify = "8"
+notify-debouncer-full = "0.5"
+rayon = "1"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+dashmap = "6"
+
+nucleo-matcher = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+humansize = "2"
+chrono = "0.4"
+anyhow = "1"
+thiserror = "2"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+zesven = "1.2"
+zip = { version = "7", default-features = false, features = ["deflate", "time"] }
+rars = "0.4"
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lzma-rs = "0.3"
+ruzstd = "0.8"
+
+trash = "5"
+arboard = "3"
+open = "5"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# NOTE: panic="abort" deliberately NOT set — it would make catch_unwind a no-op,
+# and worker-task fault isolation is worth more than the binary-size saving.
+
+[profile.dev]
+opt-level = 1
