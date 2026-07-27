@@ -148,7 +148,15 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                     row.col(|ui| {
                         // The headline feature: directories show a real size
                         // instead of a blank cell.
-                        let text = if entry.is_dir() {
+                        //
+                        // Archive folders are handled separately. Their sizes
+                        // are already rolled up from the archive index when the
+                        // listing is built, and their paths are relative to the
+                        // archive — so consulting the filesystem sizer cache
+                        // would never hit and the cell would read "…" forever.
+                        let text = if in_archive {
+                            entry.size_display()
+                        } else if entry.is_dir() {
                             match app.folder_size(&entry.path) {
                                 Some(state) => state.display(),
                                 None if app.config.performance.folder_sizes_enabled => {
