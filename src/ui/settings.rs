@@ -343,9 +343,9 @@ fn keybindings_tab(ui: &mut egui::Ui) {
             for (keys, action) in [
                 ("Ctrl + F", "Focus the filter box"),
                 ("F5", "Refresh"),
-                ("Alt + ←", "Back"),
-                ("Alt + →", "Forward"),
-                ("Alt + ↑ / Backspace", "Up one folder"),
+                ("Alt + ⬅", "Back"),
+                ("Alt + ➡", "Forward"),
+                ("Alt + ⬆ / Backspace", "Up one folder"),
                 ("Delete", "Send to Recycle Bin"),
                 ("Ctrl + ,", "Open settings"),
                 ("Escape", "Clear filter / dismiss message"),
