@@ -4,6 +4,7 @@
 //! `tracing` output is visible during development.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod archive;
 mod core;
 mod fs;
 mod ui;
