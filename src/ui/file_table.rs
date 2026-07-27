@@ -13,10 +13,6 @@ use egui_extras::{Column, TableBuilder};
 use crate::fs::entry::{EntryKind, SortKey};
 use crate::ui::app::{LoadState, RustPlorer};
 
-/// Row height in points. A fixed height is what makes virtualization possible —
-/// egui computes the visible range arithmetically instead of measuring rows.
-const ROW_HEIGHT: f32 = 24.0;
-
 pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
     // Deferred actions: we cannot mutate `app` while borrowing its entries, so
     // interactions are recorded here and applied after the closures end.
@@ -79,9 +75,10 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
         }
 
         let available = ui.available_height();
+        let row_height = app.config.appearance.row_height;
 
         TableBuilder::new(ui)
-            .striped(true)
+            .striped(app.config.appearance.striped_rows)
             .resizable(true)
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -108,7 +105,7 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                 let tab = &app.tabs[app.active_tab];
                 let selected = tab.selected;
 
-                body.rows(ROW_HEIGHT, row_count, |mut row| {
+                body.rows(row_height, row_count, |mut row| {
                     let row_idx = row.index();
 
                     // Map the visible row back to its index in the full listing.
@@ -147,7 +144,9 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                         let text = if entry.is_dir() {
                             match app.folder_size(&entry.path) {
                                 Some(state) => state.display(),
-                                None if app.compute_folder_sizes => "…".to_string(),
+                                None if app.config.performance.folder_sizes_enabled => {
+                                    "…".to_string()
+                                }
                                 None => "—".to_string(),
                             }
                         } else {
@@ -211,8 +210,9 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
     if let Some(range) = visible_range {
         // Widen slightly so sizes for rows just off-screen are ready by the
         // time they scroll into view.
-        let start = range.start.saturating_sub(5);
-        let end = range.end + 5;
+        let look = app.config.performance.size_lookahead_rows;
+        let start = range.start.saturating_sub(look);
+        let end = range.end + look;
         app.request_visible_sizes(start..end);
     }
     if let Some(path) = navigate_to {
