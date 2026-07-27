@@ -12,6 +12,7 @@ use crate::fs::ops::{FileOp, OpRunner, OpUpdate};
 use crate::fs::scanner::{quick_access, ScanUpdate, Scanner};
 use crate::fs::search::SearchFilter;
 use crate::fs::sizer::{FolderSizer, SizeState};
+use crate::fs::thumbs::{ThumbState, ThumbnailCache};
 use crate::fs::watcher::DirWatcher;
 use crate::ui::first_run::FirstRunStage;
 use crate::ui::palette::{Command, CommandPalette};
@@ -101,6 +102,7 @@ pub struct RustPlorer {
     pub archives: ArchiveBrowser,
 
     pub sizer: FolderSizer,
+    pub thumbs: ThumbnailCache,
     pub search: SearchFilter,
     pub watcher: DirWatcher,
     pub ops: OpRunner,
@@ -160,6 +162,9 @@ impl RustPlorer {
         let sizer = FolderSizer::new();
         sizer.set_max_concurrent(config.performance.effective_size_walks());
 
+        let thumbs =
+            ThumbnailCache::new(config.performance.thumbnail_cache_mb * 1024 * 1024);
+
         Self {
             pool: WorkerPool::new(worker_count),
             scanner: Scanner::new(),
@@ -172,6 +177,7 @@ impl RustPlorer {
             archive_location: None,
             archives: ArchiveBrowser::new(),
             sizer,
+            thumbs,
             search: SearchFilter::new(),
             watcher: DirWatcher::new(),
             ops: OpRunner::new(),
@@ -704,6 +710,11 @@ impl RustPlorer {
         // Concurrency applies live; worker count needs a restart.
         self.sizer
             .set_max_concurrent(self.config.performance.effective_size_walks());
+        self.thumbs
+            .set_budget(self.config.performance.thumbnail_cache_mb * 1024 * 1024);
+        if !self.config.performance.thumbnails_enabled {
+            self.thumbs.clear();
+        }
 
         if self.show_hidden != self.config.behavior.show_hidden {
             self.show_hidden = self.config.behavior.show_hidden;
@@ -729,6 +740,14 @@ impl RustPlorer {
             }
             style.spacing.item_spacing.y = 4.0 * a.row_spacing;
         });
+    }
+
+    /// Request a thumbnail for a visible row.
+    pub fn thumbnail_for(&self, path: &std::path::Path) -> Option<ThumbState> {
+        if !self.config.performance.thumbnails_enabled {
+            return None;
+        }
+        Some(self.thumbs.get_or_request(&self.pool, path))
     }
 
     /// Fold in folder-size results.
@@ -936,6 +955,11 @@ impl RustPlorer {
         out.push_str(&format!("log_dir: {:?}\n", self.diagnostics.log_dir));
         out.push_str(&format!("current_path: {:?}\n", self.active().path));
         out.push_str(&format!("entries_loaded: {}\n", self.active().entries.len()));
+        out.push_str(&format!(
+            "thumbnail_cache: {} entries, {}\n",
+            self.thumbs.len(),
+            humansize::format_size(self.thumbs.bytes_used() as u64, humansize::DECIMAL)
+        ));
         out.push_str("\n=== Recent log ===\n");
         out.push_str(&self.diagnostics.ring.dump());
         out
@@ -977,6 +1001,11 @@ impl eframe::App for RustPlorer {
 
         self.apply_watch_events();
         self.apply_size_updates();
+
+        // New thumbnails need a repaint to become visible.
+        if self.thumbs.poll() > 0 {
+            ctx.request_repaint();
+        }
         self.apply_op_updates();
 
         // Recompute the filter if the query or listing changed. Cheap no-op
