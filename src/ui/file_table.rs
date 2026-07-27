@@ -10,6 +10,7 @@
 
 use egui_extras::{Column, TableBuilder};
 
+use crate::archive::format::ArchiveFormat;
 use crate::fs::entry::{EntryKind, SortKey};
 use crate::ui::app::{LoadState, RustPlorer};
 
@@ -20,6 +21,8 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
     let mut sort_request = None;
     let mut select_row = None;
     let mut visible_range: Option<std::ops::Range<usize>> = None;
+    let mut open_archive: Option<std::path::PathBuf> = None;
+    let mut enter_archive_dir: Option<String> = None;
 
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         draw_toolbar(app, ui, &mut navigate_to);
@@ -104,6 +107,7 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
             .body(|body| {
                 let tab = &app.tabs[app.active_tab];
                 let selected = tab.selected;
+                let in_archive = app.archive_location.is_some();
 
                 body.rows(row_height, row_count, |mut row| {
                     let row_idx = row.index();
@@ -131,6 +135,9 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                         let icon = match entry.kind {
                             EntryKind::Directory => "📁",
                             EntryKind::Symlink => "🔗",
+                            // Archives read as folders, so they get their own
+                            // glyph to signal they can be entered.
+                            EntryKind::File if ArchiveFormat::is_archive(&entry.path) => "📦",
                             EntryKind::File => "📄",
                         };
                         let text = egui::RichText::new(format!("{icon} {}", entry.name));
@@ -185,15 +192,22 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
                         select_row = Some(entry_idx);
                     }
                     if resp.double_clicked() {
-                        if entry.is_dir() {
-                            navigate_to = Some(entry.path.clone());
-                        } else {
-                            // Hand non-directories to the shell. Failure here
-                            // is common (no handler registered) and must not
-                            // be fatal.
-                            if let Err(e) = open::that_detached(&entry.path) {
-                                tracing::warn!(error = %e, "could not open file");
+                        if in_archive {
+                            // Inside an archive, paths are relative to the
+                            // archive rather than the disk.
+                            if entry.is_dir() {
+                                enter_archive_dir = Some(entry.name.clone());
                             }
+                            // Opening a file inside an archive requires
+                            // extracting it first; deferred for now.
+                        } else if entry.is_dir() {
+                            navigate_to = Some(entry.path.clone());
+                        } else if ArchiveFormat::is_archive(&entry.path) {
+                            open_archive = Some(entry.path.clone());
+                        } else if let Err(e) = open::that_detached(&entry.path) {
+                            // Common failure (no registered handler); never
+                            // fatal.
+                            tracing::warn!(error = %e, "could not open file");
                         }
                     }
                 });
@@ -207,7 +221,13 @@ pub fn draw(app: &mut RustPlorer, ctx: &egui::Context) {
     if let Some(key) = sort_request {
         app.set_sort(key);
     }
-    if let Some(range) = visible_range {
+    if let Some(name) = enter_archive_dir {
+        app.enter_archive_dir(&name);
+    }
+    if let Some(path) = open_archive {
+        app.open_archive(path);
+    }
+    if let Some(range) = visible_range.filter(|_| !app.in_archive()) {
         // Widen slightly so sizes for rows just off-screen are ready by the
         // time they scroll into view.
         let look = app.config.performance.size_lookahead_rows;
@@ -298,6 +318,14 @@ fn draw_toolbar(
         }
 
         ui.separator();
+
+        // Inside an archive the breadcrumb shows the archive path plus the
+        // inner location, and is not clickable component-by-component.
+        if let Some(loc) = app.archive_location.clone() {
+            ui.label("📦");
+            ui.label(egui::RichText::new(loc.display()).monospace().small());
+            return;
+        }
 
         let path = app.active().path.clone();
         let mut accumulated = std::path::PathBuf::new();
